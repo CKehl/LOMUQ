@@ -15,3 +15,15 @@ In order to run the data generation scripts, you'll additionally need:
 - parcels (>= 2.2)
 - scipy
 - netcdf
+
+## Run the plot scripts
+
+memory-consuming script (*): python3 nc_h5_compare_vis_temporal.py -d <folder-containing-training-data-files> -A
+
+simple-but-inefficient script: python3 nc_h5_compare_vis.py -d <folder-containing-training-data-files> -A
+
+## Run the generation scripts
+
+python3 CMEMS_scenario.py -f <folder-containing-training-data-files>/file.txt -t <int-simtime-days> -dt <int-simdt-minutes> -ot <int-writtendt-minutes> -im <'rk4'|'rk45'|'em'|'m1'> -N <equation-num-samples> -sres <arcdegree-ratio-uniform-sampledensity> -gres <arcdegree-ration-quadgrit-sample> -sm <sampling-distribution-scheme='regular_jitter'|'uniform'|'gaussian'|'triangular'|'vonmises'>
+
+python3 doublegyre_scenario.py -f <folder-containing-training-data-files>/file.txt -t <int-simtime-days> -dt <int-simdt-minutes> -ot <int-writtendt-minutes> -im <'rk4'|'rk45'|'em'|'m1'> -N <equation-num-samples> -sres <arcdegree-ratio-uniform-sampledensity> -gres <arcdegree-ration-quadgrit-sample> -sm <sampling-distribution-scheme='regular_jitter'|'uniform'|'gaussian'|'triangular'|'vonmises'>
