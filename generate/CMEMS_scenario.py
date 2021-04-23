@@ -337,7 +337,7 @@ if __name__=='__main__':
     datahead = ""
     dirread_top = ""
     dirread_top_bgc = ""
-    if os.uname()[1] in ['science-bs35', 'science-bs36']:  # Gemini
+    if os.uname()[1] in ['science-bs35', 'science-bs36', 'science-bs37']:  # Gemini
         # headdir = "/scratch/{}/experiments/palaeo-parcels".format(os.environ['USER'])
         headdir = "/scratch/{}/experiments".format("ckehl")
         odir = headdir
@@ -785,6 +785,8 @@ if __name__=='__main__':
     if fZ is not None:
         pz_ds = particle_file.create_dataset("p_z", data=fZ, compression="gzip", compression_opts=4)
     pt_ds = particle_file.create_dataset("p_t", data=fT, compression="gzip", compression_opts=4)
+    # write attribute: time_in_min = np.nanmin(ctime_array, axis=0)
+    # write attribute: time_in_max = np.nanmax(ctime_array, axis=0)
     page_ds = particle_file.create_dataset("p_age", data=fA, compression="gzip", compression_opts=4)
     particle_file.close()
 
