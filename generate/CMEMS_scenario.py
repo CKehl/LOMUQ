@@ -365,7 +365,7 @@ if __name__=='__main__':
             odir = head_dir
         else:
             odir = os.path.join(odir, head_dir)
-            filename = os.path.split(filename)[1]
+        filename = os.path.split(filename)[1]
 
     func_time = []
     mem_used_GB = []
