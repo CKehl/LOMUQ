@@ -739,6 +739,7 @@ class RedQuadrant_BlackBase_GreyGrading(MultivariateColourScale):
 class BlackToRed_Monotone(MultivariateColourScale):
 
     def __init__(self):
+        super(BlackToRed_Monotone, self).__init__()
         self.cmc1_top_rgb = [1., 0., 0., 1.]
         self.cmc1_mid_rgb = None
         self.cmc1_bottom_rgb = [0., 0., 0., 1.]
@@ -749,6 +750,51 @@ class BlackToRed_Monotone(MultivariateColourScale):
             'Any': {'top': self.cmc1_top_rgb, 'mid': self.cmc1_mid_rgb, 'bottom': self.cmc1_bottom_rgb, 'colour_scale': self.cm1}
         }
         return black_to_red_palette_blackbase
+
+class BlackToGreen_Monotone(MultivariateColourScale):
+
+    def __init__(self):
+        super(BlackToGreen_Monotone, self).__init__()
+        self.cmc1_top_rgb = [0., 1., 0., 1.]
+        self.cmc1_mid_rgb = None
+        self.cmc1_bottom_rgb = [0., 0., 0., 1.]
+        self.cm1 = ListedColormap(np.linspace(start=self.cmc1_bottom_rgb, stop=self.cmc1_top_rgb, num=256, dtype=np.float32), name='B_Gm')
+
+    def to_dict(self):
+        black_to_green_palette_blackbase = {
+            'Any': {'top': self.cmc1_top_rgb, 'mid': self.cmc1_mid_rgb, 'bottom': self.cmc1_bottom_rgb, 'colour_scale': self.cm1}
+        }
+        return black_to_green_palette_blackbase
+
+class BlackToBlue_Monotone(MultivariateColourScale):
+
+    def __init__(self):
+        super(BlackToBlue_Monotone, self).__init__()
+        self.cmc1_top_rgb = [0., 0., 1., 1.]
+        self.cmc1_mid_rgb = None
+        self.cmc1_bottom_rgb = [0., 0., 0., 1.]
+        self.cm1 = ListedColormap(np.linspace(start=self.cmc1_bottom_rgb, stop=self.cmc1_top_rgb, num=256, dtype=np.float32), name='B_Bm')
+
+    def to_dict(self):
+        black_to_blue_palette_blackbase = {
+            'Any': {'top': self.cmc1_top_rgb, 'mid': self.cmc1_mid_rgb, 'bottom': self.cmc1_bottom_rgb, 'colour_scale': self.cm1}
+        }
+        return black_to_blue_palette_blackbase
+
+class BlackToGrey_Monotone(MultivariateColourScale):
+
+    def __init__(self):
+        super(BlackToGrey_Monotone, self).__init__()
+        self.cmc1_top_rgb = [0.5, 0.5, 0.5, 1.]
+        self.cmc1_mid_rgb = None
+        self.cmc1_bottom_rgb = [0., 0., 0., 1.]
+        self.cm1 = ListedColormap(np.linspace(start=self.cmc1_bottom_rgb, stop=self.cmc1_top_rgb, num=256, dtype=np.float32), name='B_GRm')
+
+    def to_dict(self):
+        black_to_grey_palette_blackbase = {
+            'Any': {'top': self.cmc1_top_rgb, 'mid': self.cmc1_mid_rgb, 'bottom': self.cmc1_bottom_rgb, 'colour_scale': self.cm1}
+        }
+        return black_to_grey_palette_blackbase
 
 class WhiteToBlue_AlphaMonotone(MultivariateColourScale):
 
@@ -787,6 +833,9 @@ bluequadrant_blackbase_greygrading = BlueQuadrant_BlackBase_GreyGrading()
 greenquadrant_blackbase_greygrading = GreenQuadrant_BlackBase_GreyGrading()
 redquadrant_blackbase_greygrading = RedQuadrant_BlackBase_GreyGrading()
 black_red_monotone = BlackToRed_Monotone()
+black_green_monotone = BlackToGreen_Monotone()
+black_blue_monotone = BlackToBlue_Monotone()
+black_grey_monotone = BlackToGrey_Monotone()
 white_blue_alpha_monotone = WhiteToBlue_AlphaMonotone()
 white_blue_opaque_monotone = WhiteToBlue_OpaqueMonotone()
 
@@ -798,6 +847,9 @@ colour_scales = {
     'green_quadrant_palette_blackbase': greenquadrant_blackbase_greygrading.to_dict(),
     'red_quadrant_palette_blackbase': redquadrant_blackbase_greygrading.to_dict(),
     'black_to_red_palette_blackbase': black_red_monotone.to_dict(),
+    'black_to_green_palette_blackbase': black_green_monotone.to_dict(),
+    'black_to_blue_palette_blackbase': black_blue_monotone.to_dict(),
+    'black_to_grey_palette_blackbase': black_grey_monotone.to_dict(),
     'white_to_blue_pallete_alpha': white_blue_alpha_monotone.to_dict(),
     'white_to_blue_pallete_opaque': white_blue_opaque_monotone.to_dict()
 }
