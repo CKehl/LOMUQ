@@ -237,8 +237,8 @@ if __name__ =='__main__':
             speed_1 = np.where(speed_1 > 0, np.sqrt(speed_1), 0)
             speed_2 = fU_nc[ti1] ** 2 + fV_nc[ti1] ** 2
             speed_2 = np.where(speed_2 > 0, np.sqrt(speed_2), 0)
-            # fu_show = tt*fU_nc[ti0][0] + (1.0-tt)*fU_nc[ti1][0]
-            # fv_show = tt*fV_nc[ti0][0] + (1.0-tt)*fV_nc[ti1][0]
+            # fu_show = tt*(1.0-tt)*fU_nc[ti0][0] + (1.0-tt)*fU_nc[ti1][0]
+            # fv_show = tt*(1.0-tt)*fV_nc[ti0][0] + (1.0-tt)*fV_nc[ti1][0]
             fs_show = tt*speed_1[0] + (1.0-tt)*speed_2[0]
             # cs_nca_u.set_array(fu_show)
             # cs_nca_v.set_array(fv_show)
@@ -355,9 +355,9 @@ if __name__ =='__main__':
             speed_1 = np.where(speed_1 > 0, np.sqrt(speed_1), 0)
             speed_2 = fU_h5[ti1] ** 2 + fV_h5[ti1] ** 2
             speed_2 = np.where(speed_2 > 0, np.sqrt(speed_2), 0)
-            # fu_show = tt*fU_nc[ti0] + (1.0-tt)*fU_nc[ti1]
-            # fv_show = tt*fV_nc[ti0] + (1.0-tt)*fV_nc[ti1]
-            fs_show = tt*speed_1 + (1.0-tt)*speed_2
+            # fu_show = (1.0-tt)*fU_nc[ti0] + (tt*fU_nc[ti1]
+            # fv_show = (1.0-tt)*fV_nc[ti0] + tt*fV_nc[ti1]
+            fs_show = (1.0-tt)*speed_1 + tt*speed_2
             # cs_nca_u.set_array(fu_show)
             # cs_nca_v.set_array(fv_show)
             cs_h5a_velmag.set_array(fs_show)

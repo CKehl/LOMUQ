@@ -140,6 +140,10 @@ if __name__ == '__main__':
     parser.add_argument("-d", "--filedir", dest="filedir", type=str,
                         default="/var/scratch/experiments/NNvsGeostatistics/data",
                         help="head directory containing all input data and also are the store target for output files")
+    parser.add_argument("-o", "--outname", dest="outname", type=str,
+                        default="dispersion.png",
+                        help="output file naming")
+    parser.add_argument("-dt", "--deltat", dest="dt", type=float, default=1.0, help="output period in days")
     parser.add_argument("-A", "--animate", dest="animate", action='store_true', default=False,
                         help="Generate particle animations (default: False).")
     args = parser.parse_args()
@@ -147,6 +151,8 @@ if __name__ == '__main__':
     # filedir = '/var/scratch/experiments/NNvsGeostatistics/data/2'
     filedir = args.filedir
     animate = args.animate
+    outname = args.outname
+    anim_dt = args.dt
     write_nc = False
     Writer = writers['imagemagick_file']
     ani_writer_h5 = Writer()
@@ -368,8 +374,8 @@ if __name__ == '__main__':
         #     ax_anim_h5.add_collection(l.get_LineCollection())
         # frames_anim = int(tN * 0.5)
         # dt_anim = sim_dt_h5 * 2.0  # /4.0
-        frames_anim = int(tN)
-        dt_anim = sim_dt_h5
+        dt_anim = anim_dt * sec_per_day
+        frames_anim = int(tN * (sim_dt_d_h5 / anim_dt))
         total_items = frames_anim
 
         def init_h5_animation():
@@ -434,6 +440,7 @@ if __name__ == '__main__':
                 ti1 = ti0 + 1
             else:
                 ti1 = 0
+            # print("Processing tx={}, tt={} ti0={} and ti1 = {}".format(tx, tt, ti0, ti1))
             speed_1 = fU_h5[ti0] ** 2 + fV_h5[ti0] ** 2
             speed_1 = np.where(speed_1 > 0, np.sqrt(speed_1), 0)
             speed_1_invalid = np.isclose(speed_1, 0) & np.isclose(speed_1,-0)
@@ -446,7 +453,7 @@ if __name__ == '__main__':
             speed_2[speed_2_invalid] = speed_2_min
             # fu_show = tt*fU_nc[ti0] + (1.0-tt)*fU_nc[ti1]
             # fv_show = tt*fV_nc[ti0] + (1.0-tt)*fV_nc[ti1]
-            fs_show = tt * speed_1 + (1.0 - tt) * speed_2
+            fs_show = (1.0 - tt) * speed_1 + tt * speed_2
             # cs_nca_u.set_array(fu_show)
             # cs_nca_v.set_array(fv_show)
             cs_h5a_velmag.set_array(fs_show)
@@ -476,9 +483,9 @@ if __name__ == '__main__':
             pd_t_1 = np.array(distances[:, ti1])
             pd_t_1 = np.take_along_axis(pd_t_1, indices, axis=0)
             # pd_t_1 = np.take_along_axis(pd_t_1, indices[sortindices], axis=0)
-            px_show = tt * px_t_0 + (1.0 - tt) * px_t_1
-            py_show = tt * py_t_0 + (1.0 - tt) * py_t_1
-            pd_show = tt * pd_t_0 + (1.0 - tt) * pd_t_1
+            px_show = (1.0 - tt) * px_t_0 + tt * px_t_1
+            py_show = (1.0 - tt) * py_t_0 + tt * py_t_1
+            pd_show = (1.0 - tt) * pd_t_0 + tt * pd_t_1
 
             px_show = np.hstack((base_px, px_show))
             py_show = np.hstack((base_py, py_show))
@@ -526,7 +533,7 @@ if __name__ == '__main__':
         ani_h5_dir = os.path.join(filedir, "dispersion_h5")
         if not os.path.exists(ani_h5_dir):
             os.mkdir(ani_h5_dir)
-        ani_h5_sim.save(os.path.join(ani_h5_dir, 'dispersion_doublegyre.png'), writer=ani_writer_h5, dpi=180)
+        ani_h5_sim.save(os.path.join(ani_h5_dir, outname), writer=ani_writer_h5, dpi=180)
 
         f_pts.close()
         del f_pts
