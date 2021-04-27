@@ -36,6 +36,7 @@ try:
 except:
     MPI = None
 with_GC = False
+DBG_MSG = False
 
 pset = None
 ptype = {'scipy': ScipyParticle, 'jit': JITParticle}
@@ -79,6 +80,34 @@ tscale = 24.0*60.0*60.0 # in seconds
 
 # we need to modify the kernel.execute / pset.execute so that it returns from the JIT
 # in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
+
+
+# Helper function for time-conversion from teh calendar format
+def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="time array"):
+    """
+
+    :param t_array: 2D array of time values in either calendar- or float-time format; dim-0 = object entities, dim-1 = time steps (or 1D with just timesteps)
+    :param dt_minutes: expected delta_t als float-value (in minutes)
+    :param ns_per_sec: conversion value of number of nanoseconds within 1 second
+    :param debug: parameter telling to print debug messages or not
+    :param array_name: name of the array (for debug prints)
+    :return: converted t_array
+    """
+    ta = t_array
+    while len(ta.shape) > 1:
+        ta = ta[0]
+    if isinstance(ta[0], datetime.datetime) or isinstance(ta[0], datetime.timedelta) or isinstance(ta[0], np.timedelta64) or isinstance(ta[0], np.datetime64) or np.float64(ta[1]-ta[0]) > (dt_minutes+dt_minutes/2.0):
+        if debug:
+            print("{}.dtype before conversion: {}".format(array_name, t_array.dtype))
+        t_array = (t_array / ns_per_sec).astype(np.float64)
+        ta = (ta / ns_per_sec).astype(np.float64)
+        if debug:
+            print("{0}.range and {0}.dtype after conversion: ({1}, {2}) \t {3}".format(array_name, ta.min(), ta.max(), ta.dtype))
+    else:
+        if debug:
+            print("{0}.range and {0}.dtype: ({1}, {2}) \t {3} \t(no conversion applied)".format(array_name, ta.min(), ta.max(), ta.dtype))
+        pass
+    return t_array
 
 def DeleteParticle(particle, fieldset, time):
     particle.delete()
@@ -580,72 +609,68 @@ if __name__=='__main__':
     step = 1.0/gres
     xsteps = int(np.floor(a * gres))
     ysteps = int(np.floor(b * gres))
-    # ------------------------------ #
-    # -- ISSUE: REMOVE OR REPLACE NAN's -- #
 
     data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
     N = data_xarray['lon'].data.shape[0]
     tN = data_xarray['lon'].data.shape[1]
-    print("N: {}, t_N: {}".format(N, tN))
+    if DBG_MSG:
+        print("N: {}, t_N: {}".format(N, tN))
     np.set_printoptions(linewidth=160)
     ns_per_sec = np.timedelta64(1, 's')  # nanoseconds in an sec
-    print("ns_per_sec = {}".format((ns_per_sec/np.timedelta64(1, 'ns')).astype(np.float64)))
+    if DBG_MSG:
+        print("ns_per_sec = {}".format((ns_per_sec/np.timedelta64(1, 'ns')).astype(np.float64)))
     sec_per_day = 86400.0
     ctime_array = data_xarray['time'].data
     time_in_min = np.nanmin(ctime_array, axis=0)
     time_in_max = np.nanmax(ctime_array, axis=0)
-    print("Times:\n\tmin = {}\n\tmax = {}".format(time_in_min, time_in_max))
+    if DBG_MSG:
+        print("Times:\n\tmin = {}\n\tmax = {}".format(time_in_min, time_in_max))
     assert ctime_array.shape[1] == time_in_min.shape[0]
+    mask_array = np.array([True,] * ctime_array.shape[0])  # this array is used to separate valid ocean particles (True) from invalid ones (e.g. land; False)
     for ti in range(ctime_array.shape[1]):
         replace_indices = np.isnan(ctime_array[:, ti])
-        ctime_array[replace_indices, ti] = time_in_max[ti]
-    print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0, 0]), np.min(ctime_array[0]), np.max(ctime_array[0])))
+        if (ti < 3):
+            reverse_replace = ~replace_indices
+            mask_array &= reverse_replace
+        ctime_array[replace_indices, ti] = time_in_max[ti]  # this ONLY works if there is no delayed start
+    if DBG_MSG:
+        print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0, 0]), np.min(ctime_array[0]), np.max(ctime_array[0])))
     # timebase = ctime_array[:, 0]
-    timebase = time_in_max[0]
     # dtime_array = np.transpose(ctime_array.transpose() - timebase)
+    timebase = time_in_max[0]
     dtime_array = ctime_array - timebase
-    print("time info from file after baselining: \n\tshape = {}".format(dtime_array.shape))
-    print("\ttype = {}".format(type(dtime_array[0, 0])))
-    print("\trange = {}".format( (np.nanmin(dtime_array), np.nanmax(dtime_array)) ))
-    # print(dtime_array.dtype)
-    # print(ns_per_sec.dtype)
-    # pX = data_xarray['lon'].data[indices, :]  # only plot the first 32 particles
-    # pY = data_xarray['lat'].data[indices, :]  # only plot the first 32 particles
+    if DBG_MSG:
+        print("time info from file after baselining: \n\tshape = {}".format(dtime_array.shape))
+        print("\ttype = {}".format(type(dtime_array[0, 0])))
+        print("\trange = {}".format( (np.nanmin(dtime_array), np.nanmax(dtime_array)) ))
 
-    fX = data_xarray['lon'].data  # to be loaded from pfile
-    fY = data_xarray['lat'].data  # to be loaded from pfile
+    fX = data_xarray['lon']  # .data
+    fY = data_xarray['lat']  # .data
     fZ = None
     if 'depth' in data_xarray.keys():
-        fZ = data_xarray['depth'].data  # to be loaded from pfile
+        fZ = data_xarray['depth']  # .data
     elif 'z' in data_xarray.keys():
-        fZ = data_xarray['z'].data  # to be loaded from pfile
+        fZ = data_xarray['z']  # .data
     fT = dtime_array
-    global_fT = time_in_max - time_in_max[0]
-    # this really need to convert to float
-    if isinstance(fT[0,0], datetime.datetime) or isinstance(fT[0, 0], datetime.timedelta) or isinstance(fT[0, 0], np.timedelta64) or isinstance(fT[0, 0], np.datetime64) or np.float64(fT[0, 1]-fT[0, 0]) > (dt_minutes+dt_minutes/2.0):
-        print("fT.dtype before conversion: {}".format(fT.dtype))
-        fT = (fT / ns_per_sec).astype(np.float64)  # to be loaded from pfile
-        global_fT = (global_fT / ns_per_sec).astype(np.float64)
-        print("fT.range and ft.dtype after conversion: ({}, {}) \t {}".format(fT[0].min(), fT[0].max(), fT.dtype))
+    global_fT = time_in_max - time_in_max[0]  # also: relative global clock
+    fT = convert_timearray(fT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="fT")
+    global_fT = convert_timearray(global_fT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="global_fT")
     fA = data_xarray['age'].data  # to be loaded from pfile | age
     for ti in range(fA.shape[1]):
         replace_indices = np.isnan(fA[:, ti])
         replace_values = None
         if ti > 0:
-            replace_values = np.fmax(fA[:, ti-1], .0)
+            replace_values = np.fmax(fA[:, ti-1], 0)
         else:
             replace_values = np.zeros((fA.shape[0],), dtype=fA.dtype)
         fA[replace_indices, ti] = replace_values[replace_indices]
-    print("original fA.range and fA.dtype (before conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
+    if DBG_MSG:
+        print("original fA.range and fA.dtype (before conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
     if not isinstance(fA[0,0], np.float32):
         # fA = np.transpose(fA.transpose()-timebase)
         fA = fA - timebase
-    if isinstance(fA[0, 0], datetime.datetime) or isinstance(fA[0, 0], datetime.timedelta) or isinstance(fT[0, 0], np.timedelta64) or isinstance(fT[0, 0], np.datetime64):  # or np.float32((fA[0, 1]-fA[0, 0])) > (dt_minutes+dt_minutes/2.0):
-        print("fA.dtype before conversion: {}".format(fA.dtype))
-        fA = (fA / ns_per_sec).astype(np.float32)
-        print("fA.range and fA.dtype (after conversion): ({}, {}) \t {}".format(float(fA.min()), float(fA.max()), fA.dtype))
+    fA = convert_timearray(fA, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="fA")
 
-    # pcounts = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.int32)
     pcounts = np.zeros((ysteps, xsteps), dtype=np.int32)
     pcounts_minmax = [0., 0.]
     pcounts_statistics = [0., 0.]
@@ -654,7 +679,6 @@ if __name__=='__main__':
     pcounts_file_ds.attrs['unit'] = "count (scalar)"
     pcounts_file_ds.attrs['name'] = 'particle_count'
 
-    # density = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.float32)
     density = np.zeros((ysteps, xsteps), dtype=np.float32)
     density_minmax = [0., 0.]
     density_statistics = [0., 0.]
@@ -663,7 +687,6 @@ if __name__=='__main__':
     density_file_ds.attrs['unit'] = "pts / arc_deg^2"
     density_file_ds.attrs['name'] = 'density'
 
-    # rel_density = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.float32)
     rel_density = np.zeros((ysteps, xsteps), dtype=np.float32)
     rel_density_minmax = [0., 0.]
     rel_density_statistics = [0., 0.]
@@ -672,7 +695,6 @@ if __name__=='__main__':
     rel_density_file_ds.attrs['unit'] = "pts_percentage / arc_deg^2"
     rel_density_file_ds.attrs['name'] = 'relative_density'
 
-    # lifetime = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.float32)
     lifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
     lifetime_minmax = [0., 0.]
     lifetime_statistics = [0., 0.]
@@ -681,30 +703,34 @@ if __name__=='__main__':
     lifetime_file_ds.attrs['unit'] = "avg. lifetime"
     lifetime_file_ds.attrs['name'] = 'lifetime'
 
+    print("\nInterpolating particle properties on regular-grid field ...")
     A = float(gres**2)
     total_items = fT.shape[0] * fT.shape[1]
+    local_to_global = np.arange(0, fX.shape[0], 1)[mask_array]
     for ti in range(fT.shape[1]):
         pcounts[:, :] = 0
         density[:, :] = 0
         rel_density[:, :] = 0
         lifetime[:, :] = 0
         tlifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
-        xpts = np.floor((fX[:, ti]+(a/2.0))*gres).astype(np.int32).flatten()
+        x_in = np.array(fX[mask_array, ti])
+        y_in = np.array(fY[mask_array, ti])
+        xpts = np.floor((x_in+(a/2.0))*gres).astype(np.int32).flatten()
         xpts = np.maximum(np.minimum(xpts, xsteps - 1), 0)
-        ypts = np.floor((fY[:, ti]+(b/2.0))*gres).astype(np.int32).flatten()
+        ypts = np.floor((y_in+(b/2.0))*gres).astype(np.int32).flatten()
         ypts = np.maximum(np.minimum(ypts, ysteps - 1), 0)
-        if ti == 0:
+        if ti == 0 and DBG_MSG:
             print("xpts: {}".format(xpts))
             print("ypts: {}".format(ypts))
         for pi in range(xpts.shape[0]):
             try:
                 pcounts[ypts[pi], xpts[pi]] += 1
-                tlifetime[ypts[pi], xpts[pi]] += fA[pi, ti]
+                tlifetime[ypts[pi], xpts[pi]] += fA[local_to_global[pi], ti]
             except (IndexError, ) as error_msg:
                 # we don't abort here cause the brownian-motion wiggle of AvectionRK4EulerMarujama always edges on machine precision, which can np.floor(..) make go over-size
                 print("\nError trying to index point ({}, {}) with indices ({}, {})".format(fX[pi, ti], fY[pi, ti], xpts[pi], ypts[pi]))
             if (pi % 100) == 0:
-                current_item = (ti*fT.shape[0]) + pi
+                current_item = (ti*fT.shape[0]) + local_to_global[pi]
                 workdone = current_item / total_items
                 print("\rProgress: [{0:50s}] {1:.1f}%".format('#' * int(workdone * 50), workdone * 100), end="", flush=True)
         density = pcounts.astype(np.float32) / A
@@ -740,12 +766,15 @@ if __name__=='__main__':
         del tlifetime
         del xpts
         del ypts
+        del x_in
+        del y_in
     print("\nField Interpolation done.")
     # rel_density = density / float(N)
     data_xarray.close()
-    print("Particle Count info: shape = {} type = {} range = {}".format(pcounts_file_ds.shape, pcounts_file_ds.dtype, pcounts_minmax))
-    print("Density info: shape = {} type = {} range = ({}, {})".format(density_file_ds.shape, density_file_ds.dtype, density.min(), density.max()))
-    print("Lifetime info: shape = {} type = {} range = ({}, {})".format(lifetime_file_ds.shape, lifetime_file_ds.dtype, lifetime.min(), lifetime.max()))
+    if DBG_MSG:
+        print("Particle Count info: shape = {} type = {} range = {}".format(pcounts_file_ds.shape, pcounts_file_ds.dtype, pcounts_minmax))
+        print("Density info: shape = {} type = {} range = ({}, {})".format(density_file_ds.shape, density_file_ds.dtype, density.min(), density.max()))
+        print("Lifetime info: shape = {} type = {} range = ({}, {})".format(lifetime_file_ds.shape, lifetime_file_ds.dtype, lifetime.min(), lifetime.max()))
 
     # pcounts_file = h5py.File(os.path.join(odir, "particlecount.h5"), "w")
     # pcounts_file_ds = pcounts_file.create_dataset("pcount", data=pcounts, compression="gzip", compression_opts=4)
@@ -781,13 +810,33 @@ if __name__=='__main__':
 
     particle_file = h5py.File(os.path.join(odir, "particles.h5"), "w")
     px_ds = particle_file.create_dataset("p_x", data=fX, compression="gzip", compression_opts=4)
+    px_ds.attrs['unit'] = "arc degree"
+    px_ds.attrs['name'] = 'longitude'
+    px_ds.attrs['min'] = fX.min()
+    px_ds.attrs['max'] = fX.max()
     py_ds = particle_file.create_dataset("p_y", data=fY, compression="gzip", compression_opts=4)
+    px_ds.attrs['unit'] = "arc degree"
+    px_ds.attrs['name'] = 'latitude'
+    px_ds.attrs['min'] = fY.min()
+    px_ds.attrs['max'] = fY.max()
     if fZ is not None:
         pz_ds = particle_file.create_dataset("p_z", data=fZ, compression="gzip", compression_opts=4)
+        px_ds.attrs['unit'] = "metres"
+        px_ds.attrs['name'] = 'depth'
+        px_ds.attrs['min'] = fZ.min()
+        px_ds.attrs['max'] = fZ.max()
     pt_ds = particle_file.create_dataset("p_t", data=fT, compression="gzip", compression_opts=4)
-    # write attribute: time_in_min = np.nanmin(ctime_array, axis=0)
-    # write attribute: time_in_max = np.nanmax(ctime_array, axis=0)
+    pt_ds.attrs['unit'] = "seconds"
+    pt_ds.attrs['name'] = 'time'
+    pt_ds.attrs['min'] = fT.min()
+    pt_ds.attrs['max'] = fT.max()
+    pt_ds.attrs['time_in_min'] = np.nanmin(global_fT, axis=0)
+    pt_ds.attrs['time_in_max'] = np.nanmax(global_fT, axis=0)
     page_ds = particle_file.create_dataset("p_age", data=fA, compression="gzip", compression_opts=4)
+    page_ds.attrs['unit'] = "seconds"
+    page_ds.attrs['name'] = 'age'
+    page_ds.attrs['min'] = fA.min()
+    page_ds.attrs['max'] = fA.max()
     particle_file.close()
 
     del rel_density
@@ -861,8 +910,8 @@ if __name__=='__main__':
     grid_time_ds = grid_file.create_dataset("times", data=global_fT, compression="gzip", compression_opts=4)
     grid_time_ds.attrs['unit'] = "seconds"
     grid_time_ds.attrs['name'] = 'time'
-    grid_time_ds.attrs['min'] = global_fT.min()
-    grid_time_ds.attrs['max'] = global_fT.max()
+    grid_time_ds.attrs['min'] = np.nanmin(global_fT)
+    grid_time_ds.attrs['max'] = np.nanmax(global_fT)
     grid_file.close()
 
     us_minmax = [0., 0.]
@@ -909,19 +958,23 @@ if __name__=='__main__':
     time_in_min_s = np.nanmin(ctime_array_s, axis=0)
     time_in_max_s = np.nanmax(ctime_array_s, axis=0)
     assert ctime_array_s.shape[1] == time_in_min.shape[0]
+    mask_array_s = np.array([True,] * ctime_array_s.shape[0])  # this array is used to separate valid ocean particles (True) from invalid ones (e.g. land; False)
     for ti in range(ctime_array_s.shape[1]):
         replace_indices = np.isnan(ctime_array_s[:, ti])
-        ctime_array_s[replace_indices, ti] = time_in_max_s[ti]
-    print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array_s.shape, type(ctime_array_s[0 ,0]), np.min(ctime_array_s[0]), np.max(ctime_array_s[0])))
+        if (ti < 3):
+            reverse_replace = ~replace_indices
+            mask_array_s &= reverse_replace
+        ctime_array_s[replace_indices, ti] = time_in_max_s[ti]  # in this application, it should always work cause there's no delauyed release
+    if DBG_MSG:
+        print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array_s.shape, type(ctime_array_s[0 ,0]), np.min(ctime_array_s[0]), np.max(ctime_array_s[0])))
     # timebase_s = ctime_array_s[:, 0]
-    timebase_s = time_in_max_s[0]
     # dtime_array_s = np.transpose(ctime_array_s.transpose() - timebase_s)
+    timebase_s = time_in_max_s[0]
     dtime_array_s = ctime_array_s - timebase_s
-    print("time info from file after baselining: shape = {} type = {} range = {}".format( dtime_array_s.shape, type(dtime_array_s[0 ,0]), (np.min(dtime_array_s), np.max(dtime_array_s)) ))
-    # print(dtime_array.dtype)
-    # print(ns_per_sec.dtype)
-    # pX = data_xarray['lon'].data[indices, :]  # only plot the first 32 particles
-    # pY = data_xarray['lat'].data[indices, :]  # only plot the first 32 particles
+    if DBG_MSG:
+        print("time info from file after baselining: shape = {} type = {} range = {}".format( dtime_array_s.shape, type(dtime_array_s[0 ,0]), (np.min(dtime_array_s), np.max(dtime_array_s)) ))
+        # print(dtime_array.dtype)
+        # print(ns_per_sec.dtype)
 
     psX = sample_xarray['lon']  # to be loaded from pfile
     psY = sample_xarray['lat']  # to be loaded from pfile
@@ -933,12 +986,14 @@ if __name__=='__main__':
     psT = dtime_array_s
     global_psT = time_in_max_s -time_in_max_s[0]
     # this really need to convert to float
-    if isinstance(psT[0, 0], datetime.datetime) or isinstance(psT[0, 0], datetime.timedelta) or isinstance(psT[0, 0], np.timedelta64) or isinstance(psT[0, 0], np.datetime64) or np.float64(psT[0, 1] - psT[0, 0]) > (dt_minutes + dt_minutes / 2.0):
-    # if isinstance(psT[0,0], datetime.datetime) or isinstance(psT[0, 0], datetime.timedelta) or np.float64(psT[0, 1]-psT[0, 0]) > (dt_minutes+dt_minutes/2.0):
-        print("psT.dtype before conversion: {}".format(psT.dtype))
-        psT = (psT / ns_per_sec).astype(np.float64)  # to be loaded from pfile
-        global_psT = (global_psT / ns_per_sec).astype(np.float64)
-        print("psT.range and ft.dtype after conversion: ({}, {}) \t {}".format(psT[0].min(), psT[0].max(), psT.dtype))
+    # if isinstance(psT[0, 0], datetime.datetime) or isinstance(psT[0, 0], datetime.timedelta) or isinstance(psT[0, 0], np.timedelta64) or isinstance(psT[0, 0], np.datetime64) or np.float64(psT[0, 1] - psT[0, 0]) > (dt_minutes + dt_minutes / 2.0):
+    ## if isinstance(psT[0,0], datetime.datetime) or isinstance(psT[0, 0], datetime.timedelta) or np.float64(psT[0, 1]-psT[0, 0]) > (dt_minutes+dt_minutes/2.0):
+    #     print("psT.dtype before conversion: {}".format(psT.dtype))
+    #     psT = (psT / ns_per_sec).astype(np.float64)  # to be loaded from pfile
+    #     global_psT = (global_psT / ns_per_sec).astype(np.float64)
+    #     print("psT.range and ft.dtype after conversion: ({}, {}) \t {}".format(psT[0].min(), psT[0].max(), psT.dtype))
+    psT = convert_timearray(psT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="psT")
+    global_psT = convert_timearray(global_psT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="global_psT")
     psU = sample_xarray['sample_u']  # to be loaded from pfile
     psV = sample_xarray['sample_v']  # to be loaded from pfile
     print("Sampled data loaded.")
@@ -947,8 +1002,10 @@ if __name__=='__main__':
     total_items = psT.shape[1]
     for ti in range(psT.shape[1]):
         us_local = np.expand_dims(psU[:, ti], axis=1)
+        us_local[~mask_array_s, :] = 0
         vs_local = np.expand_dims(psV[:, ti], axis=1)
-        if ti == 0:
+        vs_local[~mask_array_s, :] = 0
+        if ti == 0 and DBG_MSG:
             print("us.shape {}; us_local.shape: {}; psU.shape: {}; p_center_y.shape: {}".format(us.shape, us_local.shape, psU.shape, p_center_y.shape))
 
         us[:, :] = np.reshape(us_local, p_center_y.shape)
@@ -987,8 +1044,6 @@ if __name__=='__main__':
     del centers_y
     del xval
     del yval
-    # del xval_start
-    # del yval_start
     del fT
     del global_fT
     del dtime_array
