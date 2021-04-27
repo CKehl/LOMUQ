@@ -809,30 +809,30 @@ if __name__=='__main__':
     lifetime_file.close()
 
     particle_file = h5py.File(os.path.join(odir, "particles.h5"), "w")
-    px_ds = particle_file.create_dataset("p_x", data=fX, compression="gzip", compression_opts=4)
+    px_ds = particle_file.create_dataset("p_x", data=fX[mask_array, :], compression="gzip", compression_opts=4)
     px_ds.attrs['unit'] = "arc degree"
     px_ds.attrs['name'] = 'longitude'
     px_ds.attrs['min'] = fX.min()
     px_ds.attrs['max'] = fX.max()
-    py_ds = particle_file.create_dataset("p_y", data=fY, compression="gzip", compression_opts=4)
+    py_ds = particle_file.create_dataset("p_y", data=fY[mask_array, :], compression="gzip", compression_opts=4)
     px_ds.attrs['unit'] = "arc degree"
     px_ds.attrs['name'] = 'latitude'
     px_ds.attrs['min'] = fY.min()
     px_ds.attrs['max'] = fY.max()
     if fZ is not None:
-        pz_ds = particle_file.create_dataset("p_z", data=fZ, compression="gzip", compression_opts=4)
+        pz_ds = particle_file.create_dataset("p_z", data=fZ[mask_array, :], compression="gzip", compression_opts=4)
         px_ds.attrs['unit'] = "metres"
         px_ds.attrs['name'] = 'depth'
         px_ds.attrs['min'] = fZ.min()
         px_ds.attrs['max'] = fZ.max()
-    pt_ds = particle_file.create_dataset("p_t", data=fT, compression="gzip", compression_opts=4)
+    pt_ds = particle_file.create_dataset("p_t", data=fT[mask_array, :], compression="gzip", compression_opts=4)
     pt_ds.attrs['unit'] = "seconds"
     pt_ds.attrs['name'] = 'time'
     pt_ds.attrs['min'] = fT.min()
     pt_ds.attrs['max'] = fT.max()
     pt_ds.attrs['time_in_min'] = np.nanmin(global_fT, axis=0)
     pt_ds.attrs['time_in_max'] = np.nanmax(global_fT, axis=0)
-    page_ds = particle_file.create_dataset("p_age", data=fA, compression="gzip", compression_opts=4)
+    page_ds = particle_file.create_dataset("p_age", data=fA[mask_array, :], compression="gzip", compression_opts=4)
     page_ds.attrs['unit'] = "seconds"
     page_ds.attrs['name'] = 'age'
     page_ds.attrs['min'] = fA.min()
