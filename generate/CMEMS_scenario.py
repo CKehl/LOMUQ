@@ -110,6 +110,8 @@ def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="
     return t_array
 
 def DeleteParticle(particle, fieldset, time):
+    if particle.valid < 0:
+        particle.valid = 0
     particle.delete()
 
 def RenewParticle(particle, fieldset, time):
@@ -160,13 +162,18 @@ def create_CMEMS_fieldset(datahead, periodic_wrap):
     return fieldset
 
 class SampleParticle(JITParticle):
+    valid = Variable('valid', dtype=np.int32, initial=-1, to_write=True)
     sample_u = Variable('sample_u', initial=0., dtype=np.float32, to_write=True)
     sample_v = Variable('sample_v', initial=0., dtype=np.float32, to_write=True)
 
 def sample_uv(particle, fieldset, time):
     particle.sample_u = fieldset.U[time, particle.depth, particle.lat, particle.lon]
-    particle.sample_v = fieldset.U[time, particle.depth, particle.lat, particle.lon]
-    return StateCode.Success
+    particle.sample_v = fieldset.V[time, particle.depth, particle.lat, particle.lon]
+    if particle.valid < 0:
+        if (math.isnan(particle.time) == True):
+            particle.valid = 0
+        else:
+            particle.valid = 1
 
 class AgeParticle_JIT(JITParticle):
     age = Variable('age', dtype=np.float64, initial=0.0, to_write=True)
@@ -192,6 +199,43 @@ def Age(particle, fieldset, time):
         particle.age = particle.age + math.fabs(particle.dt)
     if particle.age > particle.life_expectancy:
         particle.delete()
+
+class TemporalParticles_JIT(JITParticle):
+    valid = Variable('valid', dtype=np.int32, initial=-1, to_write=True)
+    age = Variable('age', dtype=np.float64, initial=0.0, to_write=True)
+    pre_lon = Variable('pre_lon', dtype=np.float32, initial=0., to_write=False)
+    pre_lat = Variable('pre_lat', dtype=np.float32, initial=0., to_write=False)
+
+class TemporalParticles_SciPy(ScipyParticle):
+    valid = Variable('valid', dtype=np.int32, initial=-1, to_write=True)
+    age = Variable('age', dtype=np.float64, initial=0.0, to_write=True)
+    pre_lon = Variable('pre_lon', dtype=np.float32, initial=0., to_write=False)
+    pre_lat = Variable('pre_lat', dtype=np.float32, initial=0., to_write=False)
+
+def TemporalAging(particle, fieldset, time):
+    if particle.state == StateCode.Evaluate:
+        particle.age = particle.age + math.fabs(particle.dt)
+
+def validate(particle, fieldset, time):
+    if particle.valid < 0:
+        particle.pre_lon = particle.lon
+        particle.pre_lat = particle.lat
+        if (math.isnan(particle.time) == True):
+            particle.valid = 0
+        else:
+            particle.valid = 1
+    else:
+        if ((particle.lon == particle.pre_lon) and (particle.lat == particle.pre_lat)):
+            particle.valid = 0
+        else:
+            if(math.isnan(particle.time) == True):
+                particle.valid = 0
+            else:
+                particle.valid = 1
+        # particle.pre_lon = min(max(particle.lon, particle.pre_lon), particle.pre_lon)
+        # particle.pre_lat = min(max(particle.lat, particle.pre_lat), particle.pre_lat)
+        particle.pre_lon = particle.lon
+        particle.pre_lat = particle.lat
 
 def sample_regularly_jittered(lon_range, lat_range, res):
     """
@@ -276,7 +320,8 @@ def sample_particles(lon_range, lat_range, res=None, rsampler_str='regular_jitte
     else:
         return sample_irregularly(lon_range, lat_range, res, rsampler_str, nparticle)
 
-age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
+# age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
+age_ptype = {'scipy': TemporalParticles_SciPy, 'jit': TemporalParticles_JIT}
 
 # ====
 # start example: python3 doublegyre_scenario.py -f NNvsGeostatistics/data/file.txt -t 30 -dt 720 -ot 1440 -im 'rk4' -N 2**12 -sres 2 -sm 'regular_jitter'
@@ -447,8 +492,8 @@ if __name__=='__main__':
     else:
         # making sure we do track age, but life expectancy is a hard full simulation time #
         fieldset.add_constant('life_expectancy', delta(days=time_in_days).total_seconds())
-        age_ptype[(compute_mode).lower()].life_expectancy.initial = delta(days=time_in_days).total_seconds()
-        age_ptype[(compute_mode).lower()].initialized_dynamic.initial = 1
+        # age_ptype[(compute_mode).lower()].life_expectancy.initial = delta(days=time_in_days).total_seconds()
+        # age_ptype[(compute_mode).lower()].initialized_dynamic.initial = 1
 
     if repeatdtFlag:
         add_scaler = start_scaler/2.0
@@ -567,11 +612,12 @@ if __name__=='__main__':
         kernelfunc = AdvectionRK4DiffusionM1
 
     kernels = pset.Kernel(kernelfunc,delete_cfiles=True)
-    # if agingParticles:
-    if True:
+    if agingParticles:
         kernels += pset.Kernel(initialize, delete_cfiles=True)
         kernels += pset.Kernel(Age, delete_cfiles=True)
+    kernels += pset.Kernel(TemporalAging, delete_cfiles=True)
     kernels += pset.Kernel(periodicBC, delete_cfiles=True)  # insert here to correct for boundary conditions right after advection)
+    kernels += pset.Kernel(validate, delete_cfiles=True)
 
     postProcessFuncs.append(perIterGC)
     if backwardSimulation:
@@ -611,10 +657,20 @@ if __name__=='__main__':
     ysteps = int(np.floor(b * gres))
 
     data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
-    N = data_xarray['lon'].data.shape[0]
-    tN = data_xarray['lon'].data.shape[1]
+    N = data_xarray['lon'].shape[0]
+    tN = data_xarray['lon'].shape[1]
     if DBG_MSG:
         print("N: {}, t_N: {}".format(N, tN))
+    # valid_array = np.max(np.array(data_xarray['valid'][:, 0:2]), axis=1)
+    # print("Valid array: any true ? {}; all true ? {} (pre-correct)".format(np.any(valid_array > 0), np.all(valid_array > 0)))
+    # print("Valid array: any true ? {}; all true ? {} (pre-correct)".format(np.any(valid_array < 0), np.all(valid_array < 0)))
+    # valid_array = np.maximum(valid_array, 0)
+    # print("Valid array: any true ? {}; all true ? {} (post-correct)".format(np.any(valid_array > 0), np.all(valid_array > 0)))
+    # print("Valid array: any true ? {}; all true ? {} (post-correct)".format(np.any(valid_array < 0), np.all(valid_array < 0)))
+    # valid_array = valid_array.astype(np.bool)
+    valid_array = np.maximum(np.max(np.array(data_xarray['valid'][:, 0:2]), axis=1), 0).astype(np.bool)
+    if DBG_MSG:
+        print("Valid array: any true ? {}; all true ? {}".format(np.any(valid_array), np.all(valid_array)))
     np.set_printoptions(linewidth=160)
     ns_per_sec = np.timedelta64(1, 's')  # nanoseconds in an sec
     if DBG_MSG:
@@ -626,12 +682,13 @@ if __name__=='__main__':
     if DBG_MSG:
         print("Times:\n\tmin = {}\n\tmax = {}".format(time_in_min, time_in_max))
     assert ctime_array.shape[1] == time_in_min.shape[0]
-    mask_array = np.array([True,] * ctime_array.shape[0])  # this array is used to separate valid ocean particles (True) from invalid ones (e.g. land; False)
+    # mask_array = np.array([True,] * ctime_array.shape[0])  # this array is used to separate valid ocean particles (True) from invalid ones (e.g. land; False)
+    mask_array = valid_array
     for ti in range(ctime_array.shape[1]):
         replace_indices = np.isnan(ctime_array[:, ti])
-        if (ti < 3):
-            reverse_replace = ~replace_indices
-            mask_array &= reverse_replace
+        # if (ti < 3):
+        #     reverse_replace = ~replace_indices
+        #     mask_array &= reverse_replace
         ctime_array[replace_indices, ti] = time_in_max[ti]  # this ONLY works if there is no delayed start
     if DBG_MSG:
         print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0, 0]), np.min(ctime_array[0]), np.max(ctime_array[0])))
@@ -713,8 +770,8 @@ if __name__=='__main__':
         rel_density[:, :] = 0
         lifetime[:, :] = 0
         tlifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
-        x_in = np.array(fX[mask_array, ti])
-        y_in = np.array(fY[mask_array, ti])
+        x_in = np.array(fX[:, ti])[mask_array]
+        y_in = np.array(fY[:, ti])[mask_array]
         xpts = np.floor((x_in+(a/2.0))*gres).astype(np.int32).flatten()
         xpts = np.maximum(np.minimum(xpts, xsteps - 1), 0)
         ypts = np.floor((y_in+(b/2.0))*gres).astype(np.int32).flatten()
@@ -808,37 +865,74 @@ if __name__=='__main__':
     lifetime_file_ds.attrs['std'] = lifetime_statistics[1] / float(fT.shape[1])
     lifetime_file.close()
 
+    n_valid_pts = np.nonzero(mask_array)[0].shape[0]
+    print("Number valid particles: {} (of total {})".format(n_valid_pts, fX.shape[0]))
     particle_file = h5py.File(os.path.join(odir, "particles.h5"), "w")
-    px_ds = particle_file.create_dataset("p_x", data=fX[mask_array, :], compression="gzip", compression_opts=4)
+    px_ds = particle_file.create_dataset("p_x", shape=(n_valid_pts, 1), dtype=fX.dtype, maxshape=(n_valid_pts, fT.shape[1]), compression="gzip", compression_opts=4)
+    # px_ds = particle_file.create_dataset("p_x", data=np.array(fX[mask_array, :]), compression="gzip", compression_opts=4)
     px_ds.attrs['unit'] = "arc degree"
     px_ds.attrs['name'] = 'longitude'
     px_ds.attrs['min'] = fX.min()
     px_ds.attrs['max'] = fX.max()
-    py_ds = particle_file.create_dataset("p_y", data=fY[mask_array, :], compression="gzip", compression_opts=4)
-    px_ds.attrs['unit'] = "arc degree"
-    px_ds.attrs['name'] = 'latitude'
-    px_ds.attrs['min'] = fY.min()
-    px_ds.attrs['max'] = fY.max()
+    py_ds = particle_file.create_dataset("p_y", shape=(n_valid_pts, 1), dtype=fY.dtype, maxshape=(n_valid_pts, fT.shape[1]), compression="gzip", compression_opts=4)
+    # py_ds = particle_file.create_dataset("p_y", data=np.array(fY[mask_array, :]), compression="gzip", compression_opts=4)
+    py_ds.attrs['unit'] = "arc degree"
+    py_ds.attrs['name'] = 'latitude'
+    py_ds.attrs['min'] = fY.min()
+    py_ds.attrs['max'] = fY.max()
+    pz_ds = None
     if fZ is not None:
-        pz_ds = particle_file.create_dataset("p_z", data=fZ[mask_array, :], compression="gzip", compression_opts=4)
-        px_ds.attrs['unit'] = "metres"
-        px_ds.attrs['name'] = 'depth'
-        px_ds.attrs['min'] = fZ.min()
-        px_ds.attrs['max'] = fZ.max()
-    pt_ds = particle_file.create_dataset("p_t", data=fT[mask_array, :], compression="gzip", compression_opts=4)
+        pz_ds = particle_file.create_dataset("p_z", shape=(n_valid_pts, 1), dtype=fZ.dtype, maxshape=(n_valid_pts, fT.shape[1]), compression="gzip", compression_opts=4)
+        # pz_ds = particle_file.create_dataset("p_z", data=np.array(fZ[mask_array, :]), compression="gzip", compression_opts=4)
+        pz_ds.attrs['unit'] = "metres"
+        pz_ds.attrs['name'] = 'depth'
+        pz_ds.attrs['min'] = fZ.min()
+        pz_ds.attrs['max'] = fZ.max()
+    pt_ds = particle_file.create_dataset("p_t", shape=(n_valid_pts, 1), dtype=fT.dtype, maxshape=(n_valid_pts, fT.shape[1]), compression="gzip", compression_opts=4)
+    # pt_ds = particle_file.create_dataset("p_t", data=np.array(fT[mask_array, :]), compression="gzip", compression_opts=4)
     pt_ds.attrs['unit'] = "seconds"
     pt_ds.attrs['name'] = 'time'
     pt_ds.attrs['min'] = fT.min()
     pt_ds.attrs['max'] = fT.max()
     pt_ds.attrs['time_in_min'] = np.nanmin(global_fT, axis=0)
     pt_ds.attrs['time_in_max'] = np.nanmax(global_fT, axis=0)
-    page_ds = particle_file.create_dataset("p_age", data=fA[mask_array, :], compression="gzip", compression_opts=4)
+    page_ds = particle_file.create_dataset("p_age", shape=(n_valid_pts, 1), dtype=fA.dtype, maxshape=(n_valid_pts, fT.shape[1]), compression="gzip", compression_opts=4)
+    # page_ds = particle_file.create_dataset("p_age", data=np.array(fA[mask_array, :]), compression="gzip", compression_opts=4)
     page_ds.attrs['unit'] = "seconds"
     page_ds.attrs['name'] = 'age'
     page_ds.attrs['min'] = fA.min()
     page_ds.attrs['max'] = fA.max()
-    particle_file.close()
 
+    total_items = fT.shape[0] * fT.shape[1]
+    for ti in range(fT.shape[1]):
+        x_in = np.array(fX[:, ti])[mask_array]
+        y_in = np.array(fY[:, ti])[mask_array]
+        z_in = None
+        if fZ is not None:
+            z_in = np.array(fZ[:, ti])[mask_array]
+        t_in = np.array(fT[:, ti])[mask_array]
+        a_in = np.array(fA[:, ti])[mask_array]
+
+        px_ds.resize((n_valid_pts, ti+1))
+        px_ds[:, ti] = x_in
+        py_ds.resize(ti+1, axis=1)
+        py_ds[:, ti] = y_in
+        if fZ is not None:
+            pz_ds.resize(ti+1, axis=1)
+            pz_ds[:, ti] = z_in
+        pt_ds.resize(ti+1, axis=1)
+        pt_ds[:, ti] = t_in
+        page_ds.resize(ti+1, axis=1)
+        page_ds[:, ti] = a_in
+
+        del x_in
+        del y_in
+        if fZ is not None:
+            del z_in
+        del t_in
+        del a_in
+
+    particle_file.close()
     del rel_density
     del lifetime
     del density
@@ -954,16 +1048,20 @@ if __name__=='__main__':
     N_s = sample_xarray['lon'].shape[0]
     tN_s = sample_xarray['lon'].shape[1]
     print("N: {}, t_N: {}".format(N_s, tN_s))
+    valid_array = np.maximum(np.max(np.array(sample_xarray['valid'][:, 0:2]), axis=1), 0).astype(np.bool)
+    if DBG_MSG:
+        print("Valid array: any true ? {}; all true ? {}".format(valid_array.any(), valid_array.all()))
     ctime_array_s = sample_xarray['time'].data
     time_in_min_s = np.nanmin(ctime_array_s, axis=0)
     time_in_max_s = np.nanmax(ctime_array_s, axis=0)
     assert ctime_array_s.shape[1] == time_in_min.shape[0]
-    mask_array_s = np.array([True,] * ctime_array_s.shape[0])  # this array is used to separate valid ocean particles (True) from invalid ones (e.g. land; False)
+    # mask_array_s = np.array([True,] * ctime_array_s.shape[0])  # this array is used to separate valid ocean particles (True) from invalid ones (e.g. land; False)
+    mask_array_s = valid_array
     for ti in range(ctime_array_s.shape[1]):
         replace_indices = np.isnan(ctime_array_s[:, ti])
-        if (ti < 3):
-            reverse_replace = ~replace_indices
-            mask_array_s &= reverse_replace
+        # if (ti < 3):
+        #     reverse_replace = ~replace_indices
+        #     mask_array_s &= reverse_replace
         ctime_array_s[replace_indices, ti] = time_in_max_s[ti]  # in this application, it should always work cause there's no delauyed release
     if DBG_MSG:
         print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array_s.shape, type(ctime_array_s[0 ,0]), np.min(ctime_array_s[0]), np.max(ctime_array_s[0])))
