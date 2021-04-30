@@ -22,6 +22,7 @@ from TransparentCircles import TransparentCircles, TransparentEllipses
 # we will require a real vis backend - did someone say 'VTK' ?! :-(
 
 # One option remains: ArtistAnimation(...)
+GLOBAL_MIN_DIST = 0.00005
 
 def time_index_value(tx, _ft):
     # expect ft to be forward-linear
@@ -61,7 +62,7 @@ class DistanceTracker():
         self._in_dt = in_dt
         self._out_dt = out_dt
         self._result_shape = self._in_data_x.shape
-        self._result = np.zeros(self._result_shape, dtype=np.float32)
+        self._result = np.ones(self._result_shape, dtype=np.float32) * GLOBAL_MIN_DIST
         self._iter_delta = int(np.ceil(self._out_dt / self._in_dt))
         self._timetrack = np.zeros(self._iter_delta, dtype=np.int32) - 1
         self._current_time = -1
@@ -119,7 +120,7 @@ class DistanceTracker():
             local_distances = np.zeros((self._in_data_x.shape[0], lsize-1), dtype=np.int32)
             for i in range(lsize-1):
                 local_distances[:, i] = np.sqrt( (lx[:, i+1]-lx[:, i])**2 + (ly[:, i+1]-ly[:, i])**2 + (lz[:, i+1]-lz[:, i])**2 )
-            self._result[:, iteration] = np.sum(local_distances[:, 0:-1], axis=1) + curr_out_interp * local_distances[:, -1]
+            self._result[:, iteration] = np.sum(local_distances[:, :-1], axis=1) + curr_out_interp * local_distances[:, -1]
 
 def ClipLogNorm_forward(x):
     x[np.isnan(x)] = np.finfo(x.dtype).min
@@ -265,8 +266,8 @@ if __name__ == '__main__':
         print("\nDistance calculation finished.")
         distances = dtracker.results
         distances_neg_invalid = np.isclose(distances, 0) & np.isclose(distances,-0) & (distances < 0)
-        ds_min = np.maximum(distances[~distances_neg_invalid].min(), 0.0001)
-        ds_max = np.round(distances[~distances_neg_invalid].max(), decimals=4)
+        ds_min = np.maximum(distances[~distances_neg_invalid].min(), GLOBAL_MIN_DIST)
+        ds_max = np.maximum(np.round(distances[~distances_neg_invalid].max(), decimals=4), GLOBAL_MIN_DIST)
         distances[distances_neg_invalid] = np.finfo(distances.dtype).eps
         print("({}, {})".format(ds_min, ds_max))
 
