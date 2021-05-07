@@ -262,6 +262,12 @@ def sample_regularly_jittered(lon_range, lat_range, res):
     return samples_lon, samples_lat
 
 def rsample(low, high, size, sample_string):
+    if not isinstance(low, np.ndarray):
+        low = np.array(low)
+    if not isinstance(high, np.ndarray):
+        low = np.array(high)
+    if not isinstance(size, tuple):
+        size = (2, size)
     sample = None
     rng_sampler = default_rng()
     if sample_string == 'uniform':
@@ -710,8 +716,8 @@ if __name__=='__main__':
         fZ = data_xarray['z']  # .data
     fT = dtime_array
     global_fT = time_in_max - time_in_max[0]  # also: relative global clock
-    fT = convert_timearray(fT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="fT")
-    global_fT = convert_timearray(global_fT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="global_fT")
+    fT = convert_timearray(fT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fT")
+    global_fT = convert_timearray(global_fT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="global_fT")
     fA = data_xarray['age'].data  # to be loaded from pfile | age
     for ti in range(fA.shape[1]):
         replace_indices = np.isnan(fA[:, ti])
@@ -723,10 +729,10 @@ if __name__=='__main__':
         fA[replace_indices, ti] = replace_values[replace_indices]
     if DBG_MSG:
         print("original fA.range and fA.dtype (before conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
-    if not isinstance(fA[0,0], np.float32):
+    if not isinstance(fA[0,0], np.float32) and not isinstance(fA[0,0], np.float64):
         # fA = np.transpose(fA.transpose()-timebase)
         fA = fA - timebase
-    fA = convert_timearray(fA, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="fA")
+    fA = convert_timearray(fA, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fA")
 
     pcounts = np.zeros((ysteps, xsteps), dtype=np.int32)
     pcounts_minmax = [0., 0.]
@@ -1090,8 +1096,8 @@ if __name__=='__main__':
     #     psT = (psT / ns_per_sec).astype(np.float64)  # to be loaded from pfile
     #     global_psT = (global_psT / ns_per_sec).astype(np.float64)
     #     print("psT.range and ft.dtype after conversion: ({}, {}) \t {}".format(psT[0].min(), psT[0].max(), psT.dtype))
-    psT = convert_timearray(psT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="psT")
-    global_psT = convert_timearray(global_psT, dt_minutes, ns_per_sec, debug=DBG_MSG, array_name="global_psT")
+    psT = convert_timearray(psT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="psT")
+    global_psT = convert_timearray(global_psT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="global_psT")
     psU = sample_xarray['sample_u']  # to be loaded from pfile
     psV = sample_xarray['sample_v']  # to be loaded from pfile
     print("Sampled data loaded.")
