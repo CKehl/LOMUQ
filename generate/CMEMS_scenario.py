@@ -265,26 +265,37 @@ def rsample(low, high, size, sample_string):
     if not isinstance(low, np.ndarray):
         low = np.array(low)
     if not isinstance(high, np.ndarray):
-        low = np.array(high)
-    if not isinstance(size, tuple):
-        size = (2, size)
+        high = np.array(high)
+    msize = size
+    if not isinstance(msize, tuple):
+        msize = (size, 2)
     sample = None
     rng_sampler = default_rng()
     if sample_string == 'uniform':
-        sample = rng_sampler.uniform(low, high, size)
+        sample = rng_sampler.uniform(low, high, msize).transpose()
+        # sample = np.random.uniform(low, high, msize).transpose()
     elif sample_string == 'gaussian':
-        sample = rng_sampler.normal(0.0, 0.5, size) + 0.5
+        sample = rng_sampler.normal(0.0, 0.5, msize).transpose() + 0.5
+        # sample = np.random.normal(0.0, 0.5, msize) + 0.5
         sample[sample < 0] = 0.0
         sample[sample > 1] = 1.0
-        sample = sample*(high-low) + low
+        sample = sample*(high-low)  # + low
+        sample[0, :] += low[0]
+        sample[1, :] += low[1]
     elif sample_string == 'triangular':
+        if np.all(low == high):
+            print("low: {}, high: {}".format(low, high))
         mid = low + (high-low)/2.0
-        sample = rng_sampler.triangular(low, mid, high, size)
+        sample = rng_sampler.triangular(low, mid, high, msize).transpose()
+        # sample = np.random.triangular(low, mid, high, msize).transpose()
     elif sample_string == 'vonmises':
-        sample = rng_sampler.vonmises(0, 1/math.sqrt(2.0), size)+0.5
+        sample = rng_sampler.vonmises(0, 1/math.sqrt(2.0), msize).transpose() + 0.5
+        # sample = np.random.vonmises(0, 1 / math.sqrt(2.0), msize).transpose() + 0.5
         sample[sample < 0] = 0.0
         sample[sample > 1] = 1.0
-        sample = sample*(high-low) + low
+        sample = sample*(high-low)  # + low
+        sample[0, :] += low[0]
+        sample[1, :] += low[1]
     return sample
 
 def sample_irregularly(lon_range, lat_range, res=None, rsampler_str='uniform', nparticle=None):
@@ -311,8 +322,10 @@ def sample_irregularly(lon_range, lat_range, res=None, rsampler_str='uniform', n
         for i in range(lat_buckets):
             for j in range(lon_buckets):
                 local_samples = rsample([llon+(j*deg_scale), llat+(i*deg_scale)], [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale)], local_nparticle, rsampler_str)
-                samples_lon.append(local_samples[0,:])
-                samples_lat.append(local_samples[1,:])
+                # samples_lon.append(np.array(local_samples[0, :]).flatten())
+                # samples_lat.append(np.array(local_samples[1, :]).flatten())
+                samples_lon.append(local_samples[0, :])
+                samples_lat.append(local_samples[1, :])
     else:
         assert type(nparticle) in (int, np.int32, np.uint32, np.int64, np.uint64)
         samples_lon = np.random.uniform(lon_range[0], lon_range[1], nparticle)
@@ -515,44 +528,92 @@ if __name__=='__main__':
         if agingParticles:
             if repeatdtFlag:
                 startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                if not isinstance(startlon, np.ndarray):
+                    startlon = np.array(startlon).flatten()
+                if not isinstance(startlat, np.ndarray):
+                    startlat = np.array(startlat).flatten()
                 repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                if not isinstance(repeatlon, np.ndarray):
+                    repeatlon = np.array(repeatlon).flatten()
+                if not isinstance(repeatlat, np.ndarray):
+                    repeatlat = np.array(repeatlat).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
                 lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                if not isinstance(lons, np.ndarray):
+                    lons = np.array(lons).flatten()
+                if not isinstance(lats, np.ndarray):
+                    lats = np.array(lats).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         else:
             if repeatdtFlag:
                 startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                if not isinstance(startlon, np.ndarray):
+                    startlon = np.array(startlon).flatten()
+                if not isinstance(startlat, np.ndarray):
+                    startlat = np.array(startlat).flatten()
                 repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                if not isinstance(repeatlon, np.ndarray):
+                    repeatlon = np.array(repeatlon).flatten()
+                if not isinstance(repeatlat, np.ndarray):
+                    repeatlat = np.array(repeatlat).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
                 lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                if not isinstance(lons, np.ndarray):
+                    lons = np.array(lons).flatten()
+                if not isinstance(lats, np.ndarray):
+                    lats = np.array(lats).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
     else:
         # ==== forward simulation ==== #
         if agingParticles:
             if repeatdtFlag:
                 startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                if not isinstance(startlon, np.ndarray):
+                    startlon = np.array(startlon).flatten()
+                if not isinstance(startlat, np.ndarray):
+                    startlat = np.array(startlat).flatten()
                 repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                if not isinstance(repeatlon, np.ndarray):
+                    repeatlon = np.array(repeatlon).flatten()
+                if not isinstance(repeatlat, np.ndarray):
+                    repeatlat = np.array(repeatlat).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
                 lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                if not isinstance(lons, np.ndarray):
+                    lons = np.array(lons).flatten()
+                if not isinstance(lats, np.ndarray):
+                    lats = np.array(lats).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         else:
             if repeatdtFlag:
                 startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                if not isinstance(startlon, np.ndarray):
+                    startlon = np.array(startlon).flatten()
+                if not isinstance(startlat, np.ndarray):
+                    startlat = np.array(startlat).flatten()
                 repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                if not isinstance(repeatlon, np.ndarray):
+                    repeatlon = np.array(repeatlon).flatten()
+                if not isinstance(repeatlat, np.ndarray):
+                    repeatlat = np.array(repeatlat).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
                 lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                if not isinstance(lons, np.ndarray):
+                    lons = np.array(lons).flatten()
+                if not isinstance(lats, np.ndarray):
+                    lats = np.array(lats).flatten()
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
     print("Sampling concluded.")
 
