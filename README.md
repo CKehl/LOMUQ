@@ -18,9 +18,9 @@ In order to run the data generation scripts, you'll additionally need:
 
 ## Run the plot scripts
 
-memory-consuming script (*): python3 nc_h5_compare_vis_temporal.py -d <folder-containing-training-data-files> -A
+memory-consuming script (*): python3 nc_h5_compare_vis_temporal.py -d \<folder-containing-training-data-files\> -A
 
-simple-but-inefficient script: python3 nc_h5_compare_vis.py -d <folder-containing-training-data-files> -A
+simple-but-inefficient script: python3 nc_h5_compare_vis.py -d <\folder-containing-training-data-files\> -A
 
 ## Run the generation scripts
 
