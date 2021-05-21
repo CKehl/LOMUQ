@@ -13,6 +13,8 @@ from matplotlib.colors import ListedColormap
 
 GLOBAL_MIN_DIST = 0.00005
 
+# convert output images via: convert <subfolder>/<pi|u|u>-*.png -trim -channel Gray <subfolder>/<pi|u|u>-*.tif
+
 def time_index_value(tx, _ft):
     # expect ft to be forward-linear
     f_dt = _ft[1] - _ft[0]
