@@ -17,10 +17,6 @@ from datetime import timedelta
 from argparse import ArgumentParser
 from TransparentCircles import TransparentCircles, TransparentEllipses
 
-# the point-scatter plot blitting just DOESN'T FUCKING WORK ... I really tried all functions in the book here,
-# but matplotlib just proves again uncooperative when co-plotting and blitting data on top of one another.
-# we will require a real vis backend - did someone say 'VTK' ?! :-(
-
 # One option remains: ArtistAnimation(...)
 GLOBAL_MIN_DIST = 0.00005
 
@@ -99,7 +95,6 @@ class DistanceTracker():
         prev_time_frac = self._current_time / self._out_dt
         prev_out_shift = int(math.floor(prev_time_frac))
         prev_out_interp = prev_time_frac - prev_out_shift
-        # self._current_time += abs(self._in_dt)
         self._current_time = iteration * abs(self._in_dt)
         curr_time_frac = self._current_time / self._out_dt
         curr_out_shift = int(math.floor(curr_time_frac))
@@ -149,7 +144,7 @@ if __name__ == '__main__':
                         help="Generate particle animations (default: False).")
     args = parser.parse_args()
 
-    # filedir = '/var/scratch/experiments/NNvsGeostatistics/data/2'
+    # Example for filedir: '/var/scratch/experiments/NNvsGeostatistics/data/2'
     filedir = args.filedir
     animate = args.animate
     outname = args.outname
@@ -162,6 +157,8 @@ if __name__ == '__main__':
     ls = psize * 0.05
     alpha = 0.3
     zorder = 1
+    Pn = 2048
+    # di = 0  # depth index - fixed to zero cause data are 2D
 
     # ==== Load flow-field data ==== #
     f_grid_h5 = h5py.File(os.path.join(filedir, 'grid.h5'), "r")
@@ -174,12 +171,12 @@ if __name__ == '__main__':
     extends = (float(fX_h5_attrs['min']), float(fX_h5_attrs['max']), float(fY_h5_attrs['min']), float(fY_h5_attrs['max']))
 
     f_u_h5 = h5py.File(os.path.join(filedir, 'hydrodynamic_U.h5'), "r")
-    fU_h5 = f_u_h5['uo']  # [()]
+    fU_h5 = f_u_h5['uo']
     fU_h5_attrs = fU_h5.attrs
     max_u_value = np.maximum(np.abs(fU_h5_attrs['min']), np.abs(fU_h5_attrs['max']))
     fu_ext = (-max_u_value, +max_u_value)
     f_v_h5 = h5py.File(os.path.join(filedir, 'hydrodynamic_V.h5'), "r")
-    fV_h5 = f_v_h5['vo']  # [()]
+    fV_h5 = f_v_h5['vo']
     fV_h5_attrs = fV_h5.attrs
     max_v_value = np.maximum(np.abs(fV_h5_attrs['min']), np.abs(fV_h5_attrs['max']))
     fv_ext = (-max_v_value, +max_v_value)
@@ -198,16 +195,6 @@ if __name__ == '__main__':
 
     total_items = fT_h5.shape[0]
     tN = fT_h5.shape[0]
-
-    # u_h5_dir = os.path.join(filedir, "U_h5")
-    # if not os.path.exists(u_h5_dir):
-    #     os.mkdir(u_h5_dir)
-    # v_h5_dir = os.path.join(filedir, "V_h5")
-    # if not os.path.exists(v_h5_dir):
-    #     os.mkdir(v_h5_dir)
-    # velmag_h5_dir = os.path.join(filedir, "VelMag_h5")
-    # if not os.path.exists(velmag_h5_dir):
-    #     os.mkdir(velmag_h5_dir)
 
     speed_h5_ti = fU_h5[0] ** 2 + fU_h5[0] ** 2
     speed_h5_ti = np.where(speed_h5_ti > 0, np.sqrt(speed_h5_ti), 0)
@@ -230,11 +217,6 @@ if __name__ == '__main__':
     ax_cbar_h5s_velmag = fig_h5_single_velmag.add_axes([0.0, 0.9, 0.05, 0.07])
     cbar_h5s_velmag = plt.colorbar(cs_h5s_velmag, cax=ax_cbar_h5s_velmag)
 
-    # di = 0  # depth index - fixed to zero cause data are 2D
-
-    Pn = 2048
-    # indices = None  # np.random.randint(0, 100, Pn, dtype=int)
-
     # ============================================== #
     # ====  Particle Trails - Animation - HDF5  ==== #
     # ============================================== #
@@ -248,17 +230,13 @@ if __name__ == '__main__':
         N = pT_h5.shape[0]
         tN = pT_h5.shape[1]
         print("N: {}; Pn: {}; tN: {}".format(N, Pn, tN))
-        # if indices is None:
-        #     indices = np.random.randint(0, N - 1, Pn, dtype=int)
 
         time_since_release_h5 = pT_h5
-        # time_since_release_h5 = (pT_h5.transpose() - pT_h5[:, 0])  # substract the initial time from each timeseries
-        # sim_dt_h5 = time_since_release_h5[0, 1] - time_since_release_h5[0, 0]
         sim_dt_h5 = np.nanmax(pT_1_h5) - np.nanmax(pT_0_h5)
         print("dt = {}".format(sim_dt_h5))
-        pX_h5 = f_pts['p_x']  # [()][indices, :]  # only plot the first 32 particles
-        pY_h5 = f_pts['p_y']  # [()][indices, :]  # only plot the first 32 particles
-        pZ_h5 = f_pts['p_z']  # [()][indices, :]  # only plot the first 32 particles
+        pX_h5 = f_pts['p_x']
+        pY_h5 = f_pts['p_y']
+        pZ_h5 = f_pts['p_z']
         sim_dt_d_h5 = sim_dt_h5 / sec_per_day
         print("Starting distance calculations ...")
         dtracker = DistanceTracker(pX_h5, pY_h5, pZ_h5, sim_dt_d_h5, 7.0)
@@ -279,62 +257,32 @@ if __name__ == '__main__':
         speed_h5_0[speed_0_invalid] = speed_0_min
 
         indices = np.random.randint(0, N - 1, Pn, dtype=int)
-        # sortindices = np.argsort(distances[indices, 0])
-        # sortindices = np.arange(0, indices.shape[0])
         px_t_0 = np.array(pX_h5[:, 0])
         px_t_0 = np.take_along_axis(px_t_0, indices, axis=0)
-        # px_t_0 = np.take_along_axis(px_t_0, indices[sortindices], axis=0)
         py_t_0 = np.array(pY_h5[:, 0])
         py_t_0 = np.take_along_axis(py_t_0, indices, axis=0)
-        # py_t_0 = np.take_along_axis(py_t_0, indices[sortindices], axis=0)
         pd_t_0 = np.array(distances[:, 0])
         pd_t_0 = np.take_along_axis(pd_t_0, indices, axis=0)
-        # pd_t_0 = np.take_along_axis(pd_t_0, indices[sortindices], axis=0)
 
         base_px = np.array([extends[0], extends[0], extends[1], extends[1]])
         base_py = np.array([extends[2], extends[3], extends[2], extends[3]])
         base_pd = np.array([0.01, 0.01, 0.01, 0.01])
-        # base_px = np.array([0, ])
-        # base_py = np.array([0, ])
-        # base_pd = np.array([0.01, ])
 
         px_t_0 = np.hstack((base_px, px_t_0))
         py_t_0 = np.hstack((base_py, py_t_0))
         pd_t_0 = np.hstack((base_pd, pd_t_0))
 
-        # speed_map = cm.get_cmap('twilight', 256)
-        # fig_anim_h5 = plt.figure()
-        # ax_anim_h5 = plt.axes()
-        fig_anim_h5, ax_anim_h5 = plt.subplots(1, 1, figsize=(10, 8))  #, constrained_layout=True
-        # ax_scat = fig_anim_h5.add_axes([0, 0, 1, 1], frameon=False)
-        # ax_scat = ax_anim_h5
-        # ax_anim_h5.grid(True, linestyle='-', color='0.75')
+        fig_anim_h5, ax_anim_h5 = plt.subplots(1, 1, figsize=(10, 8))
         ax_anim_h5.set_xlim([extends[0], extends[1]])
         ax_anim_h5.set_ylim([extends[2], extends[3]])
 
         def register_patch(patch):
             ax_anim_h5.add_patch(patch)
 
-        # ideally, we want the FTLE map of the flow as background, if we can get that (-> ask Laura)
-        # cs_h5a_velmag = ax_anim_h5.pcolormesh(fX_h5, fY_h5, speed_h5_0, cmap=colour_scales['blue_quadrant_palette_blackbase']['VelMag']['colour_scale'],
-        #                                       norm=colors.Normalize(vmin=f_velmag_ext_h5[0], vmax=f_velmag_ext_h5[1]), shading='gouraud', animated=True, zorder=0)  # , zorder=1
-
-        # (ClipLogNorm_forward, ClipLogNorm_invert),
-        # cs_h5a_velmag = ax_anim_h5.imshow(speed_h5_0, extent=extends, cmap=colour_scales['blue_quadrant_palette_blackbase']['VelMag']['colour_scale'], interpolation='bilinear', norm=colors.Normalize(vmin=f_velmag_ext_h5[0], vmax=f_velmag_ext_h5[1]), animated=True, zorder=0 , origin='lower') # , origin='lower', aspect='auto'
-        # cs_h5a_velmag = ax_anim_h5.imshow(speed_h5_0, extent=extends, cmap=colour_scales['black_to_grey_palette_blackbase']['Any']['colour_scale'], interpolation='bilinear', norm=colors.LogNorm(vmin=f_velmag_ext_h5[0], vmax=f_velmag_ext_h5[1]), animated=True, zorder=0, origin='lower')  # , origin='lower', aspect='auto'
         cs_h5a_velmag = ax_anim_h5.imshow(speed_h5_0, extent=extends, cmap=colour_scales['black_to_grey_palette_blackbase']['Any'][ 'colour_scale'], interpolation='bilinear', norm=colors.LogNorm(vmin=f_velmag_ext_h5[0], vmax=f_velmag_ext_h5[1]), animated=True, zorder=0 , origin='lower', aspect='auto')  # , origin='lower', aspect='auto'
-        # ==== comment: REALLY try to apply a LogNormalize scale here ==== #
-        # cs_h5a_pts_coll = plt.scatter(px_t_0, py_t_0, s=psize, linewidths=ls, c=pd_t_0, cmap=colour_scales['white_to_blue_pallete_alpha']['Any']['colour_scale'], norm=colors.Normalize(vmin=ds_min, vmax=ds_max), alpha=0.5, zorder=zorder)  # , offset_position='data', alpha=alpha, transform=ax_anim_h5.transData
-        # cs_h5a_pts = TransparentCircles(px_t_0, py_t_0, register_patch_func=register_patch, s=psize, linewidths=ls, values=pd_t_0, cmap=colour_scales['white_to_blue_pallete_opaque']['Any']['colour_scale'], norm=colors.Normalize(vmin=ds_min, vmax=ds_max), alphas=alpha, zorder=2, transform=ax_anim_h5.transData)  #
-        # ==== the one below is the fasted circle-plotter ==== #
         cs_h5a_pts = TransparentEllipses(px_t_0, py_t_0, s=math.sqrt(psize), linewidths=ls, values=pd_t_0, cmap=colour_scales['white_to_blue_pallete_opaque']['Any']['colour_scale'], norm=colors.LogNorm(vmin=ds_min, vmax=ds_max), zorder=2, transform=ax_anim_h5.transData, alphas=alpha, edgecolors='White')  #
         cs_h5a_pts_coll = cs_h5a_pts.get_collection()
         ax_anim_h5.add_collection(cs_h5a_pts_coll)
-
-        # cs_h5a_pts = ax_anim_h5.scatter(px_t_0, py_t_0, s=psize, linewidths=ls, c=pd_t_0, cmap='Blues', alpha=alpha, zorder=zorder)  # , norm=colors.Normalize(vmin=ds_min, vmax=ds_max)
-        # cs_h5a_pts = ax_scat.plot(px_t_0, py_t_0, 'o', color=(0.9, 0.9, 1.0), alpha=0.8)
-        # ax_anim_h5.set_xlim([extends[0], extends[1]])
-        # ax_anim_h5.set_ylim([extends[2], extends[3]])
 
         cbar_h5a_velmag_bounds = []
         logval = round(math.log10(f_velmag_ext_h5[0])) - 1
@@ -343,7 +291,6 @@ if __name__ == '__main__':
             logval += 1
             bval = 10.0 ** (logval)
             cbar_h5a_velmag_bounds.append(bval)
-        # ax_cbar_h5a_velmag = fig_anim_h5.add_axes([0.0, 0.9, 0.04, 0.085])
         ax_cbar_h5a_velmag = fig_anim_h5.add_axes([0.1, 0.055, 0.8, 0.02])
         cbar_h5a_velmag = plt.colorbar(cs_h5a_velmag, cax=ax_cbar_h5a_velmag, ticks=cbar_h5a_velmag_bounds, orientation='horizontal')
         ax_cbar_h5a_velmag.set_xlabel("velocity magnitude [m/s]")
@@ -355,84 +302,45 @@ if __name__ == '__main__':
             logval += 1
             bval = 10.0 ** (logval)
             cbar_h5a_pts_bounds.append(bval)
-        # ax_cbar_h5a_pts = fig_anim_h5.add_axes([0.10, 0.9, 0.04, 0.085])
         ax_cbar_h5a_pts = fig_anim_h5.add_axes([0.915, 0.1, 0.02, 0.8])
         cbar_h5a_pts = plt.colorbar(cs_h5a_pts_coll, cax=ax_cbar_h5a_pts, ticks=cbar_h5a_pts_bounds, orientation='vertical')
-        # ax_cbar_h5a_pts.set_xlabel("travel distance [arc-deg.]")
         ax_cbar_h5a_pts.set_ylabel("travel distance [arc-deg.]")
 
         ax_anim_h5.set_title("Simulation - NetCDF data - t = %5.1f d" % (time_since_release_h5[0, 0] / sec_per_day))
         plt.savefig(os.path.join(filedir, "dispersion_ref.png"), dpi=300)
 
-        # lines_h5 = []
-        # for i in range(0, Pn):
-        #     lines_h5.append(DecayLine(14, 8, [0.0, 0.625, 0.0], zorder=2 + i))
-
-        # for i in range(0, Pn):
-        #     lines_h5[i].add_point(pX_h5[indices[i], 0], pY_h5[indices[i], 0])
-
-        # for l in lines_h5:
-        #     ax_anim_h5.add_collection(l.get_LineCollection())
-        # frames_anim = int(tN * 0.5)
-        # dt_anim = sim_dt_h5 * 2.0  # /4.0
         dt_anim = anim_dt * sec_per_day
         frames_anim = int(tN * (sim_dt_d_h5 / anim_dt))
         total_items = frames_anim
 
         def init_h5_animation():
-            # cs_nca_u.set_array(fU_nc[0, 0])
-            # cs_nca_v.set_array(fV_nc[0, 0])
             cs_h5a_velmag.set_array(speed_h5_0)
-            # sortindices = np.unravel_index(np.argsort(distances[indices, 0]), indices.shape)
-            # sortindices = np.arange(0, indices.shape[0])
-            # print("indices: {}".format(indices[sortindices]))
             px_t_0 = np.array(pX_h5[:, 0])
             px_t_0 = np.take_along_axis(px_t_0, indices, axis=0)
-            # px_t_0 = np.take_along_axis(px_t_0, indices[sortindices], axis=0)
             py_t_0 = np.array(pY_h5[:, 0])
             py_t_0 = np.take_along_axis(py_t_0, indices, axis=0)
-            # py_t_0 = np.take_along_axis(py_t_0, indices[sortindices], axis=0)
             pd_t_0 = np.array(distances[:, 0])
             pd_t_0 = np.take_along_axis(pd_t_0, indices, axis=0)
-            # pd_t_0 = np.take_along_axis(pd_t_0, indices[sortindices], axis=0)
 
             px_t_0 = np.hstack((base_px, px_t_0))
             py_t_0 = np.hstack((base_py, py_t_0))
             pd_t_0 = np.hstack((base_pd, pd_t_0))
 
             cs_h5a_pts.set_array(pd_t_0)
-            # cs_h5a_pts_coll.set_array(pd_t_0)  # sets the values (e.g. lifetime) interpreted by the colour map
-            # offsets = np.array([py_t, px_t])
-            # offsets = np.array([px_t, py_t])
-            # offsets = np.hstack((px_t[:, np.newaxis], py_t[:, np.newaxis]))
-            # offsets = np.c_[px_t-extends[0], py_t-extends[2]]
-            # offsets = np.c_[px_t_0, py_t_0].reshape(-1, 1, 2)
-            offsets = np.column_stack((px_t_0, py_t_0))  # .reshape(-1, 1, 2)
-            # print("offsets shape: {}".format(offsets.shape))
-            # cs_h5a_pts_coll.set_offsets(offsets)  # sets the new particle positions
+            offsets = np.column_stack((px_t_0, py_t_0))
             cs_h5a_pts.set_offsets(offsets)
             cs_h5a_pts_coll = cs_h5a_pts.get_collection()
-            # cs_h5a_pts = ax_anim_h5.scatter(px_t, py_t, s=psize, linewidths=ls, c=pd_t, cmap='Blues',
-            #                                 norm=colors.Normalize(vmin=ds_min, vmax=ds_max), alpha=alpha,
-            #                                 zorder=zorder)
 
             results = []
             results.append(cs_h5a_velmag)
             results.append(cs_h5a_pts_coll)
-            # results += cs_h5a_pts.get_artists()
-            # results.append(cs_h5a_pts)
-            # for l in lines_h5:
-            #     results.append(l.get_LineCollection())
             ax_anim_h5.set_title("Simulation - NetCDF data - t = %5.1f d" % (time_since_release_h5[0, 0] / sec_per_day))
             return results
 
 
         def update_flow_only_h5(frames, *args):
-            # if (frames % 10) == 0:
-            #     print("Plotting frame {} of {} ...".format(frames, tN))
             dt = args[0]
             tx = np.float64(frames) * dt
-            # tx = math.fmod(tx, fT_h5[-1])
             tx = np.fmod(tx, fT_h5[-1])
             ti0 = time_index_value(tx, fT_h5)
             tt = time_partion_value(tx, fT_h5)
@@ -452,38 +360,21 @@ if __name__ == '__main__':
             speed_2_invalid = np.isclose(speed_2, 0) & np.isclose(speed_2,-0)
             speed_2_min = np.finfo(speed_2.dtype).eps if speed_0_invalid.all() else np.min(speed_2[~speed_2_invalid])
             speed_2[speed_2_invalid] = speed_2_min
-            # fu_show = tt*fU_nc[ti0] + (1.0-tt)*fU_nc[ti1]
-            # fv_show = tt*fV_nc[ti0] + (1.0-tt)*fV_nc[ti1]
             fs_show = (1.0 - tt) * speed_1 + tt * speed_2
-            # cs_nca_u.set_array(fu_show)
-            # cs_nca_v.set_array(fv_show)
             cs_h5a_velmag.set_array(fs_show)
 
-            # == add new lines == #
-            # if frames > 0:
-            #     for pindex in range(0, Pn):
-            #         lines_h5[pindex].add_point(pX_h5[indices[pindex], frames], pY_h5[indices[pindex], frames])
-            # == collect results == #
-            # sortindices = np.unravel_index(np.argsort(distances[indices, ti1]), indices.shape)
-            # sortindices = np.arange(0, indices.shape[0])
             px_t_0 = np.array(pX_h5[:, ti0])
             px_t_0 = np.take_along_axis(px_t_0, indices, axis=0)
-            # px_t_0 = np.take_along_axis(px_t_0, indices[sortindices], axis=0)
             py_t_0 = np.array(pY_h5[:, ti0])
             py_t_0 = np.take_along_axis(py_t_0, indices, axis=0)
-            # py_t_0 = np.take_along_axis(py_t_0, indices[sortindices], axis=0)
             pd_t_0 = np.array(distances[:, ti0])
             pd_t_0 = np.take_along_axis(pd_t_0, indices, axis=0)
-            # pd_t_0 = np.take_along_axis(pd_t_0, indices[sortindices], axis=0)
             px_t_1 = np.array(pX_h5[:, ti1])
             px_t_1 = np.take_along_axis(px_t_1, indices, axis=0)
-            # px_t_1 = np.take_along_axis(px_t_1, indices[sortindices], axis=0)
             py_t_1 = np.array(pY_h5[:, ti1])
             py_t_1 = np.take_along_axis(py_t_1, indices, axis=0)
-            # py_t_1 = np.take_along_axis(py_t_1, indices[sortindices], axis=0)
             pd_t_1 = np.array(distances[:, ti1])
             pd_t_1 = np.take_along_axis(pd_t_1, indices, axis=0)
-            # pd_t_1 = np.take_along_axis(pd_t_1, indices[sortindices], axis=0)
             px_show = (1.0 - tt) * px_t_0 + tt * px_t_1
             py_show = (1.0 - tt) * py_t_0 + tt * py_t_1
             pd_show = (1.0 - tt) * pd_t_0 + tt * pd_t_1
@@ -493,28 +384,14 @@ if __name__ == '__main__':
             pd_show = np.hstack((base_pd, pd_show))
 
             cs_h5a_pts.set_array(pd_show)
-            # cs_h5a_pts_coll.set_array(pd_show)  # sets the values (e.g. lifetime) interpreted by the colour map
-            # offsets = np.array([py_show, px_show])
-            # offsets = np.array([px_show, py_show])
-            # offsets = np.hstack((px_show[:, np.newaxis], py_show[:, np.newaxis]))
-            # offsets = np.c_[px_show-extends[0], py_show-extends[2]]
-            # offsets = np.c_[px_show, py_show].reshape(-1, 1, 2)
-            offsets = np.column_stack((px_show, py_show))  # .reshape(-1, 1, 2)
-            # cs_h5a_pts_coll.set_offsets(offsets)  # sets the new particle positions
+            offsets = np.column_stack((px_show, py_show))  # sets the new particle positions\
             cs_h5a_pts.set_offsets(offsets)  # sets the new particle positions
             cs_h5a_pts_coll = cs_h5a_pts.get_collection()
-            # cs_h5a_pts = ax_anim_h5.scatter(px_show, py_show, s=psize, linewidths=ls, c=pd_show, cmap='Blues',
-            #                                 norm=colors.Normalize(vmin=ds_min, vmax=ds_max), alpha=alpha,
-            #                                 zorder=zorder)
 
             # == collected particles == #
             results = []
             results.append(cs_h5a_velmag)
             results.append(cs_h5a_pts_coll)
-            # results += cs_h5a_pts.get_artists()
-            # results.append(cs_h5a_pts)
-            # for l in lines_h5:
-            #     results.append(l.get_LineCollection())
             ax_anim_h5.set_title("Simulation - h5 data - t = %5.1f d" % (tx / sec_per_day))
 
             del px_t_0
@@ -529,8 +406,7 @@ if __name__ == '__main__':
             print("\rProgress - plotting particle dispersion: [{0:50s}] {1:.1f}%".format('#' * int(workdone * 50), workdone * 100), end="", flush=True)
             return results
 
-        ani_h5_sim = FuncAnimation(fig_anim_h5, update_flow_only_h5, init_func=init_h5_animation, frames=frames_anim, interval=1,
-                               fargs=[dt_anim, ])  # , save_count=1, cache_frame_data=False) #, blit=True), blit=True
+        ani_h5_sim = FuncAnimation(fig_anim_h5, update_flow_only_h5, init_func=init_h5_animation, frames=frames_anim, interval=1, fargs=[dt_anim, ])
         ani_h5_dir = os.path.join(filedir, "dispersion_h5")
         if not os.path.exists(ani_h5_dir):
             os.mkdir(ani_h5_dir)
