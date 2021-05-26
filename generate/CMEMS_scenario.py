@@ -283,7 +283,8 @@ def rsample(low, high, size, sample_string):
         scalerm = np.eye(2, dtype=sample.dtype)
         scalerm[0, 0] *= scalev[0]
         scalerm[1, 1] *= scalev[1]
-        sample = scalerm * sample  # + low
+        # sample = scalerm * sample  # + low
+        sample = np.dot(scalerm, sample)
         sample[0, :] += low[0]
         sample[1, :] += low[1]
     elif sample_string == 'triangular':
@@ -301,7 +302,8 @@ def rsample(low, high, size, sample_string):
         scalerm = np.eye(2, dtype=sample.dtype)
         scalerm[0, 0] *= scalev[0]
         scalerm[1, 1] *= scalev[1]
-        sample = scalerm * sample  # + low
+        # sample = scalerm * sample  # + low
+        sample = np.dot(scalerm, sample)
         sample[0, :] += low[0]
         sample[1, :] += low[1]
     return sample
