@@ -850,9 +850,9 @@ if __name__=='__main__':
         x_in = np.array(fX[:, ti])[mask_array]
         y_in = np.array(fY[:, ti])[mask_array]
         xpts = np.floor((x_in+(a/2.0))*gres).astype(np.int32).flatten()
-        xpts = np.maximum(np.minimum(xpts, xsteps - 1), 0)
+        xpts = xpts[(xpts >= 0) & (xpts < (xsteps-1))]
         ypts = np.floor((y_in+(b/2.0))*gres).astype(np.int32).flatten()
-        ypts = np.maximum(np.minimum(ypts, ysteps - 1), 0)
+        ypts = ypts[(ypts >= 0) & (ypts < (ysteps - 1))]
         if ti == 0 and DBG_MSG:
             print("xpts: {}".format(xpts))
             print("ypts: {}".format(ypts))

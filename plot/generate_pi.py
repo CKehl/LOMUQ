@@ -39,18 +39,11 @@ if __name__ == "__main__":
     parser.add_argument("-d", "--filedir", dest="filedir", type=str,
                         default="/var/scratch/experiments/NNvsGeostatistics/data",
                         help="head directory containing all input data and also are the store target for output files")
-    parser.add_argument("-o", "--outname", dest="outname", type=str,
-                        default="dispersion.png",
-                        help="output file naming")
     parser.add_argument("-dt", "--deltat", dest="dt", type=float, default=1.0, help="output period in days")
-    parser.add_argument("-A", "--animate", dest="animate", action='store_true', default=False,
-                        help="Generate particle animations (default: False).")
     args = parser.parse_args()
 
     # Example for filedir: '/var/scratch/experiments/NNvsGeostatistics/data/2'
     filedir = args.filedir
-    animate = args.animate
-    outname = args.outname
     anim_dt = args.dt
     Writer = writers['imagemagick_file']
     ani_writer_h5_sim = Writer()
