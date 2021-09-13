@@ -3,8 +3,8 @@ Author: Dr. Christian Kehl
 Date: 11-02-2020
 """
 
-from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, AdvectionRK4DiffusionEM, AdvectionRK4DiffusionM1
-from parcels import FieldSet, ScipyParticle, JITParticle, Variable, AdvectionRK4, StateCode, OperationCode, ErrorCode
+from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, DiffusionUniformKh, AdvectionDiffusionEM, AdvectionDiffusionM1
+from parcels import FieldSet, ScipyParticle, JITParticle, Variable, RectilinearZGrid, StateCode, OperationCode, ErrorCode
 # from parcels.particleset_benchmark import ParticleSet_Benchmark as BenchmarkParticleSet
 # from parcels.particleset import ParticleSet as DryParticleSet
 from parcels.particleset import ParticleSet as BenchmarkParticleSet
@@ -137,7 +137,7 @@ periodicBC = RenewParticle
 def perIterGC():
     gc.collect()
 
-def create_CMEMS_fieldset(datahead, periodic_wrap):
+def create_CMEMS_fieldset(datahead, periodic_wrap=False, anisotropic_diffusion=False):
     ddir = os.path.join(datahead, "CMEMS/GLOBAL_REANALYSIS_PHY_001_030/")
     files = sorted(glob(ddir+"mercatorglorys12v1_gl12_mean_201607*.nc"))
     variables = {'U': 'uo', 'V': 'vo'}
@@ -159,6 +159,57 @@ def create_CMEMS_fieldset(datahead, periodic_wrap):
     tsteps = len(fieldset.U.grid.time_full)
     global tstepsize
     tstepsize = int(math.floor(ttotal/tsteps))
+
+    Kh_zonal = None
+    Kh_meridional = None
+    xdim = fieldset.U.grid.xdim
+    ydim = fieldset.U.grid.ydim
+    tdim = fieldset.U.grid.tdim
+    if anisotropic_diffusion:
+        print("Generating anisotropic diffusion fields ...")
+        Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * 0.5 * 100.
+        Kh_meridional = np.empty((ydim, xdim), dtype=np.float32)
+        alpha = 1.  # Profile steepness
+        L = 1.  # Basin scale
+        # Ny = lat.shape[0]  # Number of grid cells in y_direction (101 +2, one level above and one below, where fields are set to zero)
+        # dy = 1.03 / Ny  # Spatial resolution
+        # y = np.linspace(-0.01, 1.01, 103)  # y-coordinates for grid
+        # y_K = np.linspace(0., 1., 101)  # y-coordinates used for setting diffusivity
+        beta = np.zeros(ydim)  # Placeholder for fraction term in K(y) formula
+
+        # for yi in range(len(y_K)):
+        for yi in range(ydim):
+            yk = (fieldset.U.lat[yi] - fieldset.U.lat[0]) / (fieldset.U.lat[1] - fieldset.U.lat[0])
+            if yk < L / 2:
+                beta[yi] = yk * np.power(L - 2 * yk, 1 / alpha)
+            elif yk[yi] >= L / 2:
+                beta[yi] = (L - yk) * np.power(2 * yk - L, 1 / alpha)
+        Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
+        for i in range(xdim):
+            for j in range(ydim):
+                Kh_meridional[j, i] = Kh_meridional_profile[j] * 100.
+    else:
+        print("Generating isotropic diffusion value ...")
+        # Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        # Kh_meridional = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+        # mesh_conversion = 1.0 / 1852. / 60 if fieldset.U.grid.mesh == 'spherical' else 1.0
+        Kh_zonal = np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        Kh_meridional = np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+
+
+    if anisotropic_diffusion:
+        Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, mesh=fieldset.U.grid.mesh)
+        # fieldset.add_field(Field("Kh_zonal", Kh_zonal, lon=lon, lat=lat, to_write=False, mesh=mesh, transpose=False))
+        # fieldset.add_field(Field("Kh_meridional", Kh_meridional, lon=lon, lat=lat, to_write=False, mesh=mesh, transpose=False))
+        fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=False, mesh=fieldset.U.grid.mesh, transpose=False))
+        fieldset.add_field(Field("Kh_meridional", Kh_meridional, grid=Kh_grid, to_write=False, mesh=fieldset.U.grid.mesh, transpose=False))
+        fieldset.add_constant("dres", max(fieldset.U.lat[1]-fieldset.U.lat[0], fieldset.U.lon[1]-fieldset.U.lon[0]))
+    else:
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh=fieldset.U.grid.mesh)
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh=fieldset.U.grid.mesh)
+        # fieldset.add_constant("Kh_zonal", Kh_zonal)
+        # fieldset.add_constant("Kh_meridional", Kh_meridional)
+
     return fieldset
 
 class SampleParticle(JITParticle):
@@ -247,18 +298,19 @@ def sample_regularly_jittered(lon_range, lat_range, res):
     """
     samples_lon = []
     samples_lat = []
-    jitter = np.random.random(2) * 1/res
+    jitter = np.random.random(2.0) * 1.0/res
     lat_buckets = int(np.floor((lat_range[1]-lat_range[0])*res))-1
     lon_buckets = int(np.floor((lon_range[1]-lon_range[0])*res))-1
     for i in range(lat_buckets):
         for j in range(lon_buckets):
             # sample = [jitter[0]+lon_range[0]+(j*(1/res))/(lon_range[1]-lon_range[0]), jitter[1]+lat_range[0]+(i*(1/res))/(lat_range[1]-lat_range[0])]
-            sample = [jitter[0] + lon_range[0] + (j * (1 / res)),
-                      jitter[1] + lat_range[0] + (i * (1 / res))]
+            sample = [jitter[0] + lon_range[0] + (j * (1.0 / res)),
+                      jitter[1] + lat_range[0] + (i * (1.0 / res))]
             samples_lon.append(sample[0])
             samples_lat.append(sample[1])
     # samples_lon = np.unique(samples_lon)
     # samples_lat = np.unique(samples_lat)
+    # print("Samples: lon - {}; lat - {}".format(samples_lon, samples_lat))
     return samples_lon, samples_lat
 
 def rsample(low, high, size, sample_string):
@@ -313,7 +365,7 @@ def sample_irregularly(lon_range, lat_range, res=None, rsampler_str='uniform', n
 
     :param lon_range:
     :param lat_range:
-    :param res: square-root of particles per sauqre-arc degree or metre
+    :param res: square-root of particles per square-arc degree or metre
     :param nparticle:
     :return:
     """
@@ -327,13 +379,13 @@ def sample_irregularly(lon_range, lat_range, res=None, rsampler_str='uniform', n
         deg_scale = 1.0
         local_nparticle = int(res**2)
         if res<1.0:
-            deg_scale = int(np.round(1/res))
+            deg_scale = int(np.round(1.0/float(res)))
             local_nparticle = 1
+            lon_buckets = int(np.round(lon_buckets / float(deg_scale)))
+            lat_buckets = int(np.round(lat_buckets / float(deg_scale)))
         for i in range(lat_buckets):
             for j in range(lon_buckets):
                 local_samples = rsample([llon+(j*deg_scale), llat+(i*deg_scale)], [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale)], local_nparticle, rsampler_str)
-                # samples_lon.append(np.array(local_samples[0, :]).flatten())
-                # samples_lat.append(np.array(local_samples[1, :]).flatten())
                 samples_lon.append(local_samples[0, :])
                 samples_lat.append(local_samples[1, :])
     else:
@@ -367,7 +419,7 @@ if __name__=='__main__':
     parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=1, help="runtime in days (default: 1)")
     parser.add_argument("-dt", "--deltatime", dest="dt", type=int, default=720, help="computational delta_t time stepping in minutes (default: 720min = 12h)")
     parser.add_argument("-ot", "--outputtime", dest="outdt", type=int, default=1440, help="repeating release rate of added particles in minutes (default: 1440min = 24h)")
-    parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1'], default="jit", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1)]")
+    parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1', 'bm'], default="jit", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1), bm (Brownian Motion)]")
     # parser.add_argument("-x", "--xarray", dest="use_xarray", action='store_true', default=False, help="use xarray as data backend")
     # parser.add_argument("-w", "--writeout", dest="write_out", action='store_true', default=False, help="write data in outfile")
     # parser.add_argument("-d", "--delParticle", dest="delete_particle", action='store_true', default=False, help="switch to delete a particle (True) or reset a particle (default: False).")
@@ -408,7 +460,12 @@ if __name__=='__main__':
     cycle_scaler = 7.0 / 4.0
     # start_N_particles = int(float(eval(args.start_nparticles)))
     start_N_particles = Nparticle
-    sres = int(float(eval(args.sres)))
+    # sres = int(float(eval(args.sres)))
+    sres = float(eval(args.sres))
+    if sres == round(sres):
+        sres = int(sres)
+    if sres < 0.:
+        sres = None
     gres = int(float(eval(args.gres)))
     sample_mode = args.sample_mode
     interp_mode = args.interp_mode
@@ -489,7 +546,7 @@ if __name__=='__main__':
     #     ftimes = fieldset.U.grid.time_full
     #     U = fieldset.U
     #     V = fieldset.V
-    fieldset = create_CMEMS_fieldset(datahead=datahead, periodic_wrap=True)
+    fieldset = create_CMEMS_fieldset(datahead=datahead, periodic_wrap=True, anisotropic_diffusion=(interp_mode in ['em', 'm1']))
 
     if MPI:
         mpi_comm = MPI.COMM_WORLD
@@ -533,16 +590,20 @@ if __name__=='__main__':
         repeatRateMinutes = int(refresh_cycle/60.0) if repeatRateMinutes == 720 else repeatRateMinutes
 
     print("Sampling the grid and creating the particle set now ...")
+    sample_start_scaler = sres*start_scaler if sres is not None else sres
+    # sample_start_scaler = int(np.floor(sres * start_scaler)) if sres is None else sres
+    sample_add_scaler = int(np.floor(sres*add_scaler)) if sres is not None else sres
+    # sample_add_scaler = int(np.floor(sres * add_scaler)) if sres is not None else sres
     if backwardSimulation:
         # ==== backward simulation ==== #
         if agingParticles:
             if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_start_scaler, sample_mode, Nparticle)
                 if not isinstance(startlon, np.ndarray):
                     startlon = np.array(startlon).flatten()
                 if not isinstance(startlat, np.ndarray):
                     startlat = np.array(startlat).flatten()
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_add_scaler, sample_mode, Nparticle)
                 if not isinstance(repeatlon, np.ndarray):
                     repeatlon = np.array(repeatlon).flatten()
                 if not isinstance(repeatlat, np.ndarray):
@@ -551,7 +612,7 @@ if __name__=='__main__':
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, Nparticle)
                 if not isinstance(lons, np.ndarray):
                     lons = np.array(lons).flatten()
                 if not isinstance(lats, np.ndarray):
@@ -559,12 +620,12 @@ if __name__=='__main__':
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         else:
             if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_start_scaler, sample_mode, Nparticle)
                 if not isinstance(startlon, np.ndarray):
                     startlon = np.array(startlon).flatten()
                 if not isinstance(startlat, np.ndarray):
                     startlat = np.array(startlat).flatten()
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_add_scaler, sample_mode, Nparticle)
                 if not isinstance(repeatlon, np.ndarray):
                     repeatlon = np.array(repeatlon).flatten()
                 if not isinstance(repeatlat, np.ndarray):
@@ -573,7 +634,7 @@ if __name__=='__main__':
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, Nparticle)
                 if not isinstance(lons, np.ndarray):
                     lons = np.array(lons).flatten()
                 if not isinstance(lats, np.ndarray):
@@ -583,12 +644,12 @@ if __name__=='__main__':
         # ==== forward simulation ==== #
         if agingParticles:
             if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_start_scaler, sample_mode, Nparticle)
                 if not isinstance(startlon, np.ndarray):
                     startlon = np.array(startlon).flatten()
                 if not isinstance(startlat, np.ndarray):
                     startlat = np.array(startlat).flatten()
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_add_scaler, sample_mode, Nparticle)
                 if not isinstance(repeatlon, np.ndarray):
                     repeatlon = np.array(repeatlon).flatten()
                 if not isinstance(repeatlat, np.ndarray):
@@ -597,7 +658,7 @@ if __name__=='__main__':
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, Nparticle)
                 if not isinstance(lons, np.ndarray):
                     lons = np.array(lons).flatten()
                 if not isinstance(lats, np.ndarray):
@@ -605,12 +666,12 @@ if __name__=='__main__':
                 pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         else:
             if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_start_scaler, sample_mode, Nparticle)
                 if not isinstance(startlon, np.ndarray):
                     startlon = np.array(startlon).flatten()
                 if not isinstance(startlat, np.ndarray):
                     startlat = np.array(startlat).flatten()
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sample_add_scaler, sample_mode, Nparticle)
                 if not isinstance(repeatlon, np.ndarray):
                     repeatlon = np.array(repeatlon).flatten()
                 if not isinstance(repeatlat, np.ndarray):
@@ -619,7 +680,7 @@ if __name__=='__main__':
                 psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
                 pset.add(psetA)
             else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, Nparticle)
                 if not isinstance(lons, np.ndarray):
                     lons = np.array(lons).flatten()
                 if not isinstance(lats, np.ndarray):
@@ -667,7 +728,7 @@ if __name__=='__main__':
 
     delete_func = RenewParticle
     if deleteBC:
-        delete_func=DeleteParticle
+        delete_func = DeleteParticle
     postProcessFuncs = []
 
     if MPI:
@@ -679,16 +740,18 @@ if __name__=='__main__':
         starttime = ostime.process_time()
 
     kernelfunc = AdvectionEE
-    if interp_mode == 'rk4':
+    if interp_mode in ['rk4', 'bm']:
         kernelfunc = AdvectionRK4
     elif interp_mode == 'rk45':
         kernelfunc = AdvectionRK45
     elif interp_mode == 'em':
-        kernelfunc = AdvectionRK4DiffusionEM
+        kernelfunc = AdvectionDiffusionEM
     elif interp_mode == 'm1':
-        kernelfunc = AdvectionRK4DiffusionM1
+        kernelfunc = AdvectionDiffusionM1
 
     kernels = pset.Kernel(kernelfunc,delete_cfiles=True)
+    if interp_mode == 'bm':
+        kernels += pset.Kernel(DiffusionUniformKh, delete_cfiles=True)
     if agingParticles:
         kernels += pset.Kernel(initialize, delete_cfiles=True)
         kernels += pset.Kernel(Age, delete_cfiles=True)
