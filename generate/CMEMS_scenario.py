@@ -298,7 +298,7 @@ def sample_regularly_jittered(lon_range, lat_range, res):
     """
     samples_lon = []
     samples_lat = []
-    jitter = np.random.random(2.0) * 1.0/res
+    jitter = np.random.random(2) * 1.0/res
     lat_buckets = int(np.floor((lat_range[1]-lat_range[0])*res))-1
     lon_buckets = int(np.floor((lon_range[1]-lon_range[0])*res))-1
     for i in range(lat_buckets):
