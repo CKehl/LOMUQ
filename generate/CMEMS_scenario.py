@@ -913,9 +913,10 @@ if __name__=='__main__':
         x_in = np.array(fX[:, ti])[mask_array]
         y_in = np.array(fY[:, ti])[mask_array]
         xpts = np.floor((x_in+(a/2.0))*gres).astype(np.int32).flatten()
-        xpts = xpts[(xpts >= 0) & (xpts < (xsteps-1))]
         ypts = np.floor((y_in+(b/2.0))*gres).astype(np.int32).flatten()
-        ypts = ypts[(ypts >= 0) & (ypts < (ysteps - 1))]
+        indices = np.unique(np.concatenate([np.nonzero((xpts >= 0) & (xpts < (xsteps - 1)))[0], np.nonzero((ypts >= 0) & (ypts < (ysteps - 1)))[0]]))
+        xpts = xpts[indices]
+        ypts = ypts[indices]
         if ti == 0 and DBG_MSG:
             print("xpts: {}".format(xpts))
             print("ypts: {}".format(ypts))
@@ -925,7 +926,10 @@ if __name__=='__main__':
                 tlifetime[ypts[pi], xpts[pi]] += fA[local_to_global[pi], ti]
             except (IndexError, ) as error_msg:
                 # we don't abort here cause the brownian-motion wiggle of AvectionRK4EulerMarujama always edges on machine precision, which can np.floor(..) make go over-size
-                print("\nError trying to index point ({}, {}) with indices ({}, {})".format(fX[pi, ti], fY[pi, ti], xpts[pi], ypts[pi]))
+                # print("\nError trying to index point ({}, {}) with indices ({}, {})".format(fX[pi, ti], fY[pi, ti], xpts[pi], ypts[pi]))
+                print("\nError trying to index point ({}, {}) ...".format(fX[pi, ti], fY[pi, ti]))
+                print("Point index: {}".format(pi))
+                print("Requested spatial index: ({}, {})".format(xpts[pi], ypts[pi]))
             if (pi % 100) == 0:
                 current_item = (ti*fT.shape[0]) + local_to_global[pi]
                 workdone = current_item / total_items
