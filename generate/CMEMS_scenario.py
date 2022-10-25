@@ -82,7 +82,7 @@ tscale = 24.0*60.0*60.0 # in seconds
 # in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
 
 
-# Helper function for time-conversion from teh calendar format
+# Helper function for time-conversion from the calendar format
 def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="time array"):
     """
 
@@ -165,7 +165,7 @@ def create_CMEMS_fieldset(datahead, periodic_wrap=False, anisotropic_diffusion=F
     xdim = fieldset.U.grid.xdim
     ydim = fieldset.U.grid.ydim
     tdim = fieldset.U.grid.tdim
-    if anisotropic_diffusion:
+    if anisotropic_diffusion: # simplest case: 10 m/s^2 -> Lacerda et al. 2019
         print("Generating anisotropic diffusion fields ...")
         Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * 0.5 * 100.
         Kh_meridional = np.empty((ydim, xdim), dtype=np.float32)

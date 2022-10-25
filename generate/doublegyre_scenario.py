@@ -5,9 +5,7 @@ Date: 11-02-2020
 
 from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, DiffusionUniformKh, AdvectionDiffusionEM, AdvectionDiffusionM1
 from parcels import FieldSet, RectilinearZGrid, ScipyParticle, JITParticle, Variable, StateCode, OperationCode, ErrorCode
-# from parcels.particleset_benchmark import ParticleSet_Benchmark as BenchmarkParticleSet
-# from parcels.particleset import ParticleSet as DryParticleSet
-from parcels.particleset import ParticleSet as BenchmarkParticleSet
+from parcels import ParticleSetAOS, ParticleSetSOA
 from parcels.field import Field, VectorField, NestedField, SummedField
 # from parcels import plotTrajectoriesFile_loadedField
 # from parcels import rng as random
@@ -24,6 +22,7 @@ import sys
 import gc
 import os
 import time as ostime
+from glob import glob
 # import matplotlib.pyplot as plt
 # from parcels.tools import perlin3d
 # from parcels.tools import perlin2d
@@ -69,41 +68,52 @@ tscale = 12.0*60.0*60.0 # in seconds
 # gyre_rotation_speed = (366.0*24.0*60.0*60.0)/2.0  # assume 1 rotation every 26 weeks
 gyre_rotation_speed = 366.0*24.0*60.0*60.0  # assume 1 rotation every 52 weeks
 # ==== INFO FROM NEMO-MEDUSA: realistic values are 0-2.5 [m/s] ==== #
-# scalefac = 2.0 * 6.0 # scaling the advection speeds to 12 m/s
-# scalefac = (40.0 / (1000.0/60.0))  # 40 km/h
-# scalefactor = (2.0 / (1000.0/60.0))  #  -> 40 kph far to fast on scale max. 2 km.
-scalefactor = (6.0 / (1000.0/60.0))  #  -> 40 kph far to fast on scale max. 2 km.
+# scalefac = (40.0 / (1000.0/ (60.0 * 60.0)))  # 40 km/h
+scalefactor = ((4.0*1000) / (60.0*60.0))  # 4 km/h
+vertical_scale = (800.0 / (24*60.0*60.0))  # 800 m/d
 # ==== ONLY APPLY BELOW SCALING IF MESH IS FLAT AND (a, b) are below 100,000 [m] ==== #
 v_scale_small = 1./1000.0 # this is to adapt, cause 1 U = 1 m/s = 1 spatial unit / time unit; spatial scale; domain = 1920 m x 960 m -> scale needs to be adapted to to interpret speed on a 1920 km x 960 km grid
 
-# we need to modify the kernel.execute / pset.execute so that it returns from the JIT
-# in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
 
 def DeleteParticle(particle, fieldset, time):
     particle.delete()
 
+
 def RenewParticle(particle, fieldset, time):
     xe = 3.6 * 1e2
     ye = 1.8 * 1e2
-    # particle.lat = np.random.rand() * (-a) + (a/2.0)
-    # particle.lon = np.random.rand() * (-b) + (b/2.0)
+    EA = xe/2.0
+    WE = -xe/2.0
+    NO = ye/2.0
+    SO = -ye/2.0
+
+    particle.lon = WE + ParcelsRandom.random() * (EA - WE)
+    particle.lat = SO + ParcelsRandom.random() * (NO - SO)
+    # if fieldset.isThreeD > 0.0:
+    #     TO = fieldset.top
+    #     BO = fieldset.bottom
+    #     particle.depth = TO + ((BO-TO) / 0.75) + ((BO-TO) * -0.5 * ParcelsRandom.random())
+
+
+def WrapClipParticle(particle, fieldset, time):
+    xe = 3.6 * 1e2
+    ye = 1.8 * 1e2
     if particle.lon >= (xe/2.0):
         particle.lon -= xe
     if particle.lon < (-xe/2.0):
         particle.lon += xe
-    # particle.lat = min(particle.lat, ye/2.0 - ye/1000.0)
-    # particle.lat = max(particle.lat, -ye/2.0 + ye/1000.0)
     if particle.lat >= (ye/2.0):
-    #     particle.lat -= b
-        particle.lat = ye / 2.0 - (abs(particle.lat) - ye/2.0)
+        particle.lat = (ye / 2.0) - 0.001
     if particle.lat < (-ye/2.0):
-    #     particle.lat += b
-        particle.lat = -ye / 2.0 + (abs(particle.lat) - ye/2.0)
+        particle.lat = (-ye / 2.0) + 0.001
 
-periodicBC = RenewParticle
+
+periodicBC = WrapClipParticle
+
 
 def perIterGC():
     gc.collect()
+
 
 def doublegyre_from_numpy(xdim=960, ydim=480, periodic_wrap=False, write_out=False, steady=False, mesh='flat', anisotropic_diffusion=False):
     """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002"""
@@ -112,7 +122,116 @@ def doublegyre_from_numpy(xdim=960, ydim=480, periodic_wrap=False, write_out=Fal
     omega = 2 * np.pi
 
     scalefac = scalefactor
-    if 'flat' in mesh and np.maximum(a, b) < 100000:
+    if 'flat' in mesh and np.maximum(a, b) > 370.0 and np.maximum(a, b) < 100000:
+        scalefac *= v_scale_small
+
+    lon = np.linspace(-a*0.5, a*0.5, xdim, dtype=np.float32)
+    lonrange = lon.max()-lon.min()
+    sys.stdout.write("lon field: {}\n".format(lon.size))
+    lat = np.linspace(-b*0.5, b*0.5, ydim, dtype=np.float32)
+    latrange = lat.max() - lat.min()
+    sys.stdout.write("lat field: {}\n".format(lat.size))
+    totime = (tsteps * tstepsize) * tscale
+    times = np.linspace(0., totime, tsteps, dtype=np.float64)
+    sys.stdout.write("time field: {}\n".format(times.size))
+    dx, dy = lon[2]-lon[1], lat[2]-lat[1]
+
+    U = np.zeros((times.size, lat.size, lon.size), dtype=np.float32)
+    V = np.zeros((times.size, lat.size, lon.size), dtype=np.float32)
+    freqs = np.ones(times.size, dtype=np.float32)
+    if not steady:
+        for ti in range(times.shape[0]):
+            time_f = times[ti] / gyre_rotation_speed
+            # time_f = np.fmod((times[ti])/gyre_rotation_speed, 2.0)
+            # time_f = np.fmod((times[ti]/gyre_rotation_speed), 2*np.pi)
+            # freqs[ti] = omega * np.cos(time_f) * 2.0
+            freqs[ti] *= omega * time_f
+            # freqs[ti] *= time_f
+    else:
+        freqs = (freqs * 0.5) * omega
+
+    for ti in range(times.shape[0]):
+        freq = freqs[ti]
+        # print(freq)
+        for i in range(lon.shape[0]):
+            for j in range(lat.shape[0]):
+                x1 = ((lon[i]*2.0 + a) / a) # - dx / 2
+                x2 = ((lat[j]*2.0 + b) / (2.0*b)) # - dy / 2
+                f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
+                U[ti, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
+                V[ti, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
+
+    U *= scalefac
+    # U = np.transpose(U, (0, 2, 1))
+    V *= scalefac
+    # V = np.transpose(V, (0, 2, 1))
+    Kh_zonal = None
+    Kh_meridional = None
+    if anisotropic_diffusion:
+        print("Generating anisotropic diffusion fields ...")
+        Kh_zonal = np.ones((lat.size, lon.size), dtype=np.float32) * 0.5 * 100.
+        Kh_meridional = np.empty((lat.size, lon.size), dtype=np.float32)
+        alpha = 1.  # Profile steepness
+        L = 1.  # Basin scale
+        # Ny = lat.shape[0]  # Number of grid cells in y_direction (101 +2, one level above and one below, where fields are set to zero)
+        # dy = 1.03 / Ny  # Spatial resolution
+        # y = np.linspace(-0.01, 1.01, 103)  # y-coordinates for grid
+        # y_K = np.linspace(0., 1., 101)  # y-coordinates used for setting diffusivity
+        beta = np.zeros(lat.shape[0])  # Placeholder for fraction term in K(y) formula
+
+        # for yi in range(len(y_K)):
+        for yi in range(lat.shape[0]):
+            yk = ((lat[yi]*2.0 + b) / (2.0*b))
+            if yk < L / 2:
+                beta[yi] = yk * np.power(L - 2 * yk, 1 / alpha)
+            elif yk >= L / 2:
+                beta[yi] = (L - yk) * np.power(2 * yk - L, 1 / alpha)
+        Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
+        for i in range(lon.shape[0]):
+            for j in range(lat.shape[0]):
+                Kh_meridional[j, i] = Kh_meridional_profile[j] * 100.
+    else:
+        print("Generating isotropic diffusion value ...")
+        # Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        # Kh_meridional = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+        # mesh_conversion = 1.0 / 1852. / 60 if fieldset.U.grid.mesh == 'spherical' else 1.0
+        Kh_zonal = np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        Kh_meridional = np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+
+
+    data = {'U': U, 'V': V}
+    dimensions = {'time': times, 'lon': lon, 'lat': lat}
+    fieldset = None
+    if periodic_wrap:
+        fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, time_periodic=delta(days=366))
+    else:
+        fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, allow_time_extrapolation=True)
+
+    if write_out:
+        fieldset.write(filename=write_out)
+    if anisotropic_diffusion:
+        Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, mesh=mesh)
+        # fieldset.add_field(Field("Kh_zonal", Kh_zonal, lon=lon, lat=lat, to_write=False, mesh=mesh, transpose=False))
+        # fieldset.add_field(Field("Kh_meridional", Kh_meridional, lon=lon, lat=lat, to_write=False, mesh=mesh, transpose=False))
+        fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=False, mesh=mesh, transpose=False, allow_time_extrapolation=True))
+        fieldset.add_field(Field("Kh_meridional", Kh_meridional, grid=Kh_grid, to_write=False, mesh=mesh, transpose=False, allow_time_extrapolation=True))
+        fieldset.add_constant("dres", max(lat[1]-lat[0], lon[1]-lon[0]))
+    else:
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh=mesh)
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh=mesh)
+        # fieldset.add_constant("Kh_zonal", Kh_zonal)
+        # fieldset.add_constant("Kh_meridional", Kh_meridional)
+
+    return lon, lat, times, U, V, fieldset
+
+def doublegyre_from_numpy_3D(xdim=960, ydim=480, periodic_wrap=False, write_out=False, steady=False, mesh='flat', anisotropic_diffusion=False):
+    """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002"""
+    A = 0.3
+    epsilon = 0.25
+    omega = 2 * np.pi
+
+    scalefac = scalefactor
+    if 'flat' in mesh and np.maximum(a, b) > 370.0 and np.maximum(a, b) < 100000:
         scalefac *= v_scale_small
 
     lon = np.linspace(-a*0.5, a*0.5, xdim, dtype=np.float32)
@@ -386,7 +505,7 @@ if __name__=='__main__':
     parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=1, help="runtime in days (default: 1)")
     parser.add_argument("-dt", "--deltatime", dest="dt", type=int, default=720, help="computational delta_t time stepping in minutes (default: 720min = 12h)")
     parser.add_argument("-ot", "--outputtime", dest="outdt", type=int, default=1440, help="repeating release rate of added particles in minutes (default: 1440min = 24h)")
-    parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1', 'bm'], default="jit", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1), bm (Brownian Motion)]")
+    parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1', 'bm'], default="rk4", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1), bm (Brownian Motion)]")
     # parser.add_argument("-x", "--xarray", dest="use_xarray", action='store_true', default=False, help="use xarray as data backend")
     # parser.add_argument("-w", "--writeout", dest="write_out", action='store_true', default=False, help="write data in outfile")
     # parser.add_argument("-d", "--delParticle", dest="delete_particle", action='store_true', default=False, help="switch to delete a particle (True) or reset a particle (default: False).")
@@ -454,9 +573,10 @@ if __name__=='__main__':
     dt_minutes = args.dt
     outdt_minutes = args.outdt
     nowtime = datetime.datetime.now()
-    ParcelsRandom.seed(nowtime.microsecond)
+    ParcelsRandom.seed()
+    np.random.seed(nowtime.microsecond)
 
-    branch = "soa_benchmark"
+    branch = "LOMUQ"
     computer_env = "local/unspecified"
     scenario = "doublegyre"
     odir = ""
@@ -479,11 +599,13 @@ if __name__=='__main__':
         else:
             odir = os.path.join(odir, head_dir)
             filename = os.path.split(filename)[1]
+    pfname, pfext = os.path.splitext(filename)
+    if not os.path.exists(odir):
+        os.makedirs(odir)
 
     func_time = []
     mem_used_GB = []
 
-    np.random.seed(0)
     fieldset = None
     flons = np.array([])
     flats = np.array([])
@@ -493,7 +615,7 @@ if __name__=='__main__':
     field_fpath = False
     if writeout:
         field_fpath = os.path.join(odir,"doublegyre")
-    flons, flats, ftimes, U, V, fieldset = doublegyre_from_numpy(xdim=field_sx, ydim=field_sy, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical', anisotropic_diffusion=(interp_mode in ['em', 'm1']))
+    flons, flats, ftimes, U, V, fieldset = doublegyre_from_numpy(xdim=field_sx, ydim=field_sy, periodic_wrap=periodicFlag, write_out=field_fpath+".nc", mesh='spherical', anisotropic_diffusion=(interp_mode in ['em', 'm1']))
 
     if MPI:
         mpi_comm = MPI.COMM_WORLD
