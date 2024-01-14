@@ -440,7 +440,7 @@ if __name__=='__main__':
 
     branch = "soa_benchmark"
     computer_env = "local/unspecified"
-    scenario = "doublegyre"
+    scenario = "CMEMS"
     headdir = ""
     odir = ""
     dirread_pal = ""
