@@ -12,9 +12,10 @@ from parcels.field import Field, VectorField, NestedField, SummedField
 # from parcels import plotTrajectoriesFile_loadedField
 # from parcels import rng as random
 from parcels import ParcelsRandom
-from datetime import timedelta as delta
-import math
 from argparse import ArgumentParser
+from datetime import timedelta as delta
+from glob import glob
+import math
 import datetime
 import numpy as np
 from numpy.random import default_rng
@@ -24,9 +25,6 @@ import sys
 import gc
 import os
 import time as ostime
-# import matplotlib.pyplot as plt
-from parcels.tools import perlin3d
-from parcels.tools import perlin2d
 from scipy.interpolate import interpn
 import h5py
 
@@ -35,32 +33,18 @@ try:
 except:
     MPI = None
 with_GC = False
+DBG_MSG = False
 
 pset = None
 ptype = {'scipy': ScipyParticle, 'jit': JITParticle}
 method = {'RK4': AdvectionRK4, 'EE': AdvectionEE, 'RK45': AdvectionRK45}
 global_t_0 = 0
 Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
-#Nparticle = int(math.pow(2,11)) # equals to Nparticle = 2048
-#Nparticle = int(math.pow(2,12)) # equals to Nparticle = 4096
-#Nparticle = int(math.pow(2,13)) # equals to Nparticle = 8192
-#Nparticle = int(math.pow(2,14)) # equals to Nparticle = 16384
-#Nparticle = int(math.pow(2,15)) # equals to Nparticle = 32768
-#Nparticle = int(math.pow(2,16)) # equals to Nparticle = 65536
-#Nparticle = int(math.pow(2,17)) # equals to Nparticle = 131072
-#Nparticle = int(math.pow(2,18)) # equals to Nparticle = 262144
 #Nparticle = int(math.pow(2,19)) # equals to Nparticle = 524288
 
-#a = 1000 * 1e3
-#b = 1000 * 1e3
-#scalefac = 2.0
-#tsteps = 61
-#tscale = 6
-
-# a = 9.6 * 1e3  # by definition: meters
-# b = 4.8 * 1e3  # by definiton: meters
 a = 3.6 * 1e2  # by definition: meters
 b = 1.8 * 1e2  # by definiton: meters
+c = 2.1 * 1e3  # by definiton: meters
 tsteps = 122 # in steps
 tstepsize = 6.0 # unitary
 tscale = 12.0*60.0*60.0 # in seconds
@@ -79,37 +63,169 @@ v_scale_small = 1./1000.0 # this is to adapt, cause 1 U = 1 m/s = 1 spatial unit
 # we need to modify the kernel.execute / pset.execute so that it returns from the JIT
 # in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
 
+
+# Helper function for time-conversion from teh calendar format
+def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="time array"):
+    """
+
+    :param t_array: 2D array of time values in either calendar- or float-time format; dim-0 = object entities, dim-1 = time steps (or 1D with just timesteps)
+    :param dt_minutes: expected delta_t als float-value (in minutes)
+    :param ns_per_sec: conversion value of number of nanoseconds within 1 second
+    :param debug: parameter telling to print debug messages or not
+    :param array_name: name of the array (for debug prints)
+    :return: converted t_array
+    """
+    ta = t_array
+    while len(ta.shape) > 1:
+        ta = ta[0]
+    if isinstance(ta[0], datetime.datetime) or isinstance(ta[0], datetime.timedelta) or isinstance(ta[0], np.timedelta64) or isinstance(ta[0], np.datetime64) or np.float64(ta[1]-ta[0]) > (dt_minutes+dt_minutes/2.0):
+        if debug:
+            print("{}.dtype before conversion: {}".format(array_name, t_array.dtype))
+        t_array = (t_array / ns_per_sec).astype(np.float64)
+        ta = (ta / ns_per_sec).astype(np.float64)
+        if debug:
+            print("{0}.range and {0}.dtype after conversion: ({1}, {2}) \t {3}".format(array_name, ta.min(), ta.max(), ta.dtype))
+    else:
+        if debug:
+            print("{0}.range and {0}.dtype: ({1}, {2}) \t {3} \t(no conversion applied)".format(array_name, ta.min(), ta.max(), ta.dtype))
+        pass
+    return t_array
+
 def DeleteParticle(particle, fieldset, time):
     particle.delete()
 
 def RenewParticle(particle, fieldset, time):
-    xe = 3.6 * 1e2
-    ye = 1.8 * 1e2
-    # particle.lat = np.random.rand() * (-a) + (a/2.0)
-    # particle.lon = np.random.rand() * (-b) + (b/2.0)
-    if particle.lon >= (xe/2.0):
-        particle.lon -= xe
-    if particle.lon < (-xe/2.0):
-        particle.lon += xe
-    # particle.lat = min(particle.lat, ye/2.0 - ye/1000.0)
-    # particle.lat = max(particle.lat, -ye/2.0 + ye/1000.0)
-    if particle.lat >= (ye/2.0):
-    #     particle.lat -= b
-        particle.lat = ye / 2.0 - (abs(particle.lat) - ye/2.0)
-    if particle.lat < (-ye/2.0):
-    #     particle.lat += b
-        particle.lat = -ye / 2.0 + (abs(particle.lat) - ye/2.0)
+    EA = fieldset.east_lim
+    WE = fieldset.west_lim
+    dlon = EA - WE
+    NO = fieldset.north_lim
+    SO = fieldset.south_lim
+    dlat = NO - SO
+    if particle.lon < WE:
+        particle.lon += dlon
+    if particle.lon > EA:
+        particle.lon -= dlon
+    if particle.lat < SO:
+        particle.lat += dlat
+    if particle.lat > NO:
+        particle.lat -= dlat
+    if fieldset.isThreeD > 0.0:
+        TO = fieldset.top
+        BO = fieldset.bottom
+        if particle.depth < TO:
+            particle.depth += 1.0
+        if particle.depth > BO:
+            particle.depth -= 1.0
 
-periodicBC = RenewParticle
+    # particle.lon = WE + ParcelsRandom.random() * (EA - WE)
+    # particle.lat = SO + ParcelsRandom.random() * (NO - SO)
+    # if fieldset.isThreeD > 0.0:
+    #     TO = fieldset.top
+    #     BO = fieldset.bottom
+    #     particle.depth = TO + ((BO-TO) / 0.75) + ((BO-TO) * -0.5 * ParcelsRandom.random())
+
+
+def periodicBC(particle, fieldSet, time):
+    EA = fieldset.east_lim
+    WE = fieldset.west_lim
+    dlon = EA - WE
+    NO = fieldset.north_lim
+    SO = fieldset.south_lim
+    dlat = NO - SO
+    if particle.lon < WE:
+        particle.lon += dlon
+    if particle.lon > EA:
+        particle.lon -= dlon
+    if particle.lat < SO:
+        particle.lat += dlat
+    if particle.lat > NO:
+        particle.lat -= dlat
+
 
 def perIterGC():
     gc.collect()
 
+
+def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_out=False, steady=False, mesh='flat'):
+    """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002
+       Also: Ph.D. Thesis A.S. Parkash, p.35 - 37
+       see: https://vcg.iwr.uni-heidelberg.de/plugins/vcg_-_double_gyre_3d"""
+    A = 0.3  # range: [0 .. 1]
+    epsilon = 0.25  # range: [0 .. 1]
+    omega = 2 * np.pi * 1.0  # periodicity: [0.1 .. 10.0]
+
+    scalefac = scalefactor
+    if 'flat' in mesh and np.maximum(a, b) < 100000:
+        scalefac *= v_scale_small
+
+    lon = np.linspace(-a*0.5, a*0.5, xdim, dtype=np.float32)
+    lonrange = lon.max()-lon.min()
+    sys.stdout.write("lon field: {}\n".format(lon.size))
+    lat = np.linspace(-b*0.5, b*0.5, ydim, dtype=np.float32)
+    latrange = lat.max() - lat.min()
+    sys.stdout.write("lat field: {}\n".format(lat.size))
+    depth = np.linspace(0.0, c, zdim, dtype=np.float32)
+    depthrange = depth.max() - depth.min()
+    sys.stdout.write("depth field: {}\n".format(depth.size))
+    totime = (tsteps * tstepsize) * tscale
+    times = np.linspace(0., totime, tsteps, dtype=np.float64)
+    sys.stdout.write("time field: {}\n".format(times.size))
+    dx, dy, dz = lon[2]-lon[1], lat[2]-lat[1], depth[2]-depth[1]
+
+    U = np.zeros((times.size, depth.size, lat.size, lon.size), dtype=np.float32)
+    V = np.zeros((times.size, depth.size, lat.size, lon.size), dtype=np.float32)
+    W = np.zeros((times.size, depth.size, lat.size, lon.size), dtype=np.float32)
+    freqs = np.ones(times.size, dtype=np.float32)
+    if not steady:
+        for ti in range(times.shape[0]):
+            time_f = times[ti] / gyre_rotation_speed
+            freqs[ti] *= omega * time_f
+    else:
+        freqs = (freqs * 0.5) * omega
+
+    for ti in range(times.shape[0]):
+        freq = freqs[ti]
+        for i in range(lon.shape[0]):
+            for j in range(lat.shape[0]):
+                for k in range(depth.shape[0]):
+                    x1 = ((lon[i] + (a/2.0)) / a)
+                    x2 = ((lat[j] + (b/2.0)) / b)
+                    x3 = (depth[k] / c)
+                    f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
+                    U[ti, k, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
+                    V[ti, k, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
+                    W[ti, k, j, i] = 0.2 * x3 * (1.0 - x3) * (x3 - epsilon * np.sin(4 * np.pi * freq) - 0.5)
+
+    U *= scalefac
+    # U = np.transpose(U, (0, 2, 1))
+    V *= scalefac
+    # V = np.transpose(V, (0, 2, 1))
+    W *= scalefac
+    # W = np.transpose(W, (0, 2, 1))
+    Kh_zonal = np.ones(U.shape, dtype=np.float32) * 0.5
+    Kh_meridional = np.ones(U.shape, dtype=np.float32) * 0.5
+
+
+    data = {'U': U, 'V': V, 'W': W, 'Kh_zonal': Kh_zonal, 'Kh_meridional': Kh_meridional}
+    dimensions = {'time': times, 'depth': depth, 'lon': lon, 'lat': lat}
+    fieldset = None
+    if periodic_wrap:
+        fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, time_periodic=delta(days=366))
+    else:
+        fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, allow_time_extrapolation=True)
+    # fieldset.add_constant_field("Kh_zonal", 1, mesh="flat")
+    # fieldset.add_constant_field("Kh_meridonal", 1, mesh="flat")
+    fieldset.add_constant("dres", 0.01)
+    if write_out:
+        fieldset.write(filename=write_out)
+    return lon, lat, depth, times, U, V, W, fieldset
+
+
 def doublegyre_from_numpy(xdim=960, ydim=480, periodic_wrap=False, write_out=False, steady=False, mesh='flat'):
     """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002"""
-    A = 0.3
-    epsilon = 0.25
-    omega = 2 * np.pi
+    A = 0.3  # range: [0 .. 1]
+    epsilon = 0.25  # range: [0 .. 1]
+    omega = 2 * np.pi * 1.0  # periodicity: [0.1 .. 10.0]
 
     scalefac = scalefactor
     if 'flat' in mesh and np.maximum(a, b) < 100000:
@@ -145,8 +261,8 @@ def doublegyre_from_numpy(xdim=960, ydim=480, periodic_wrap=False, write_out=Fal
         # print(freq)
         for i in range(lon.shape[0]):
             for j in range(lat.shape[0]):
-                x1 = ((lon[i]*2.0 + a) / a) # - dx / 2
-                x2 = ((lat[j]*2.0 + b) / (2.0*b)) # - dy / 2
+                x1 = ((lon[i] + (a/2.0)) / a)  # - dx / 2
+                x2 = ((lat[j] + (b/2.0)) / b)  # - dy / 2 || / (2.0*)
                 f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
                 U[ti, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
                 V[ti, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
@@ -174,13 +290,68 @@ def doublegyre_from_numpy(xdim=960, ydim=480, periodic_wrap=False, write_out=Fal
     return lon, lat, times, U, V, fieldset
 
 
+def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, diffusion=False):
+    """
+    Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002
+    """
+    if filepath is None:
+        return None
+    extra_fields = {}
+    head_dir = os.path.dirname(filepath)
+    basename = os.path.basename(filepath)
+    fname, fext = os.path.splitext(basename)
+    fext = ".nc" if len(fext) == 0 else fext
+    flen = len(fname)
+    field_fnames = glob(os.path.join(head_dir, fname+"*"+fext))
+    for field_fname in field_fnames:
+        field_fname, field_fext = os.path.splitext(os.path.basename(field_fname))
+        field_indicator = field_fname[flen:]
+        if field_indicator not in ["U", "V"]:
+            extra_fields[field_indicator] = field_indicator
+    if len(list(extra_fields.keys())) < 1:
+        extra_fields = None
+
+    a, b, c = 1.0, 1.0, 1.0
+    simtime_days = 366 if simtime_days is None else simtime_days
+
+    fieldset = None
+    if periodic_wrap:
+        fieldset = FieldSet.from_parcels(os.path.join(head_dir, fname), extra_fields=extra_fields, time_periodic=delta(days=simtime_days).total_seconds(), deferred_load=True, allow_time_extrapolation=False, chunksize='auto')
+        # return FieldSet.from_xarray_dataset(ds, variables, dimensions, mesh='flat', time_periodic=delta(days=366))
+    else:
+        fieldset = FieldSet.from_parcels(os.path.join(head_dir, fname), extra_fields=extra_fields, time_periodic=None, deferred_load=True, allow_time_extrapolation=True, chunksize='auto')
+        # return FieldSet.from_xarray_dataset(ds, variables, dimensions, mesh='flat', allow_time_extrapolation=True)
+    ftimes = fieldset.U.time
+    flons = fieldset.U.lon
+    a = flons[len(flons)-1] - flons[0]
+    flats = fieldset.V.lat
+    b = flats[len(flats) - 1] - flats[0]
+    fdepths = None
+    if "W" in extra_fields:
+        fdepths = fieldset.W.depth
+        c = fdepths[len(fdepths)-1] - fdepths[0]
+        # fieldset.add_constant("top", depth[0] + 0.001)
+        # fieldset.add_constant("bottom", depth[len(depth)-1] - 0.001)
+    Kh_zonal = None
+    Kh_meridional = None
+    if diffusion:
+        Kh_zonal = np.random.uniform(9.5, 10.5)  # in m^2/s
+        Kh_meridional = np.random.uniform(7.5, 12.5)  # in m^2/s
+        Kh_zonal, Kh_meridional = Kh_zonal * 100.0, Kh_meridional * 100.0  # because the mesh is flat
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh="flat")
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh="flat")
+    return ftimes, fdepths, flats, flons, fieldset, a, b, c
+
+
 class AgeParticle_JIT(JITParticle):
     age = Variable('age', dtype=np.float64, initial=0.0, to_write=True)
+    age_d = Variable('age_d', dtype=np.float32, initial=0.0, to_write=True)
     life_expectancy = Variable('life_expectancy', dtype=np.float64, initial=np.finfo(np.float64).max, to_write=False)
     initialized_dynamic = Variable('initialized_dynamic', dtype=np.int32, initial=0, to_write=False)
 
 class AgeParticle_SciPy(ScipyParticle):
     age = Variable('age', dtype=np.float64, initial=0.0)
+    age_d = Variable('age_d', dtype=np.float32, initial=0.0, to_write=True)
     life_expectancy = Variable('life_expectancy', dtype=np.float64, initial=np.finfo(np.float64).max, to_write=False)
     initialized_dynamic = Variable('initialized_dynamic', dtype=np.int32, initial=0, to_write=False)
 
@@ -188,16 +359,32 @@ def initialize(particle, fieldset, time):
     if particle.initialized_dynamic < 1:
         np_scaler = math.sqrt(3.0 / 2.0)
         particle.life_expectancy = time + ParcelsRandom.uniform(.0, (fieldset.life_expectancy-time) * 2.0 / np_scaler)
-        # particle.life_expectancy = time + ParcelsRandom.uniform(.0, (fieldset.life_expectancy-time)*math.sqrt(3.0 / 2.0))
-        # particle.life_expectancy = time + ParcelsRandom.uniform(.0, fieldset.life_expectancy) * math.sqrt(3.0 / 2.0)
-        # particle.life_expectancy = time+ParcelsRandom.uniform(.0, fieldset.life_expectancy) * ((3.0/2.0)**2.0)
         particle.initialized_dynamic = 1
 
 def Age(particle, fieldset, time):
     if particle.state == StateCode.Evaluate:
         particle.age = particle.age + math.fabs(particle.dt)
+        particle.age_d = particle.age/86400.0
     if particle.age > particle.life_expectancy:
         particle.delete()
+
+
+def UniformDiffusion(particle, fieldset, time):
+    dWx = 0.
+    dWy = 0.
+    bx = 0.
+    by = 0.
+
+    if particle.state == StateCode.Evaluate:
+        # dWt = 0.
+        dWt = math.sqrt(math.fabs(particle.dt))
+        dWx = ParcelsRandom.normalvariate(0, dWt)
+        dWy = ParcelsRandom.normalvariate(0, dWt)
+        bx = math.sqrt(2 * fieldset.Kh_zonal)
+        by = math.sqrt(2 * fieldset.Kh_meridional)
+
+    particle.lon += bx * dWx
+    particle.lat += by * dWy
 
 def sample_regularly_jittered(lon_range, lat_range, res):
     """
@@ -292,28 +479,19 @@ age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
 if __name__=='__main__':
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
     parser.add_argument("-f", "--filename", dest="filename", type=str, default="file.txt", help="(relative) (text) file path of the csv hyper parameters")
-    # parser.add_argument("-b", "--backwards", dest="backwards", action='store_true', default=False, help="enable/disable running the simulation backwards")
-    # parser.add_argument("-p", "--periodic", dest="periodic", action='store_true', default=False, help="enable/disable periodic wrapping (else: extrapolation)")
-    # parser.add_argument("-r", "--release", dest="release", action='store_true', default=False, help="continuously add particles via repeatdt (default: False)")
-    # parser.add_argument("-rt", "--releasetime", dest="repeatdt", type=int, default=720, help="repeating release rate of added particles in Minutes (default: 720min = 12h)")
-    # parser.add_argument("-a", "--aging", dest="aging", action='store_true', default=False, help="Removed aging particles dynamically (default: False)")
     parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=1, help="runtime in days (default: 1)")
     parser.add_argument("-dt", "--deltatime", dest="dt", type=int, default=720, help="computational delta_t time stepping in minutes (default: 720min = 12h)")
     parser.add_argument("-ot", "--outputtime", dest="outdt", type=int, default=1440, help="repeating release rate of added particles in minutes (default: 1440min = 24h)")
     parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1'], default="jit", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1)]")
-    # parser.add_argument("-x", "--xarray", dest="use_xarray", action='store_true', default=False, help="use xarray as data backend")
     # parser.add_argument("-w", "--writeout", dest="write_out", action='store_true', default=False, help="write data in outfile")
-    # parser.add_argument("-d", "--delParticle", dest="delete_particle", action='store_true', default=False, help="switch to delete a particle (True) or reset a particle (default: False).")
-    # parser.add_argument("-A", "--animate", dest="animate", action='store_true', default=False, help="animate the particle trajectories during the run or not (default: False).")
-    # parser.add_argument("-V", "--visualize", dest="visualize", action='store_true', default=False, help="Visualize particle trajectories at the end (default: False). Requires -w in addition to take effect.")
     parser.add_argument("-N", "--n_particles", dest="nparticles", type=str, default="2**6", help="number of particles to generate and advect (default: 2e6)")
-    # parser.add_argument("-sN", "--start_n_particles", dest="start_nparticles", type=str, default="96", help="(optional) number of particles generated per release cycle (if --rt is set) (default: 96)")
-    # parser.add_argument("-m", "--mode", dest="compute_mode", choices=['jit','scipy'], default="jit", help="computation mode = [JIT, SciPp]")
     parser.add_argument("-sres", "--sample_resolution", dest="sres", type=str, default="2", help="number of particle samples per arc-dgree (default: 2)")
     parser.add_argument("-gres", "--grid_resolution", dest="gres", type=str, default="10", help="number of cells per arc-degree or metre (default: 10)")
     parser.add_argument("-sm", "--samplemode", dest="sample_mode", choices=['regular_jitter','uniform','gaussian','triangular','vonmises'], default='regular_jitter', help="sampling distribution mode = [regular_jitter, (irregular) uniform, (irregular) gaussian, (irregular) triangular, (irregular) vonmises]")
     parser.add_argument("-fsx", "--field_sx", dest="field_sx", type=int, default="480", help="number of original field cells in x-direction")
     parser.add_argument("-fsy", "--field_sy", dest="field_sy", type=int, default="240", help="number of original field cells in y-direction")
+    parser.add_argument("-fsz", "--field_sz", dest="field_sz", type=int, default="20", help="number of original field cells in z-direction")
+    parser.add_argument("-3D", "--threeD", dest="threeD", action='store_true', default=False, help="make a 3D-simulation (default: False).")
     args = parser.parse_args()
 
     ParticleSet = BenchmarkParticleSet
@@ -323,6 +501,7 @@ if __name__=='__main__':
     filename=args.filename
     field_sx = args.field_sx
     field_sy = args.field_sy
+    field_sz = args.field_sz
     deleteBC = False
     animate_result = False
     visualize_results = False
@@ -331,6 +510,7 @@ if __name__=='__main__':
     repeatdtFlag=False
     repeatRateMinutes=720
     time_in_days = args.time_in_days
+    time_in_years = int(float(time_in_days)/365.0)
     agingParticles = False
     writeout = True
     with_GC = True
@@ -363,10 +543,14 @@ if __name__=='__main__':
     outdt_minutes = args.outdt
     nowtime = datetime.datetime.now()
     ParcelsRandom.seed(nowtime.microsecond)
+    np.random.seed(0)
+    use_3D = args.threeD
 
-    branch = "soa_benchmark"
+    branch = "generate"
     computer_env = "local/unspecified"
     scenario = "doublegyre"
+    if use_3D:
+        scenario += "3D"
     odir = ""
     if os.uname()[1] in ['science-bs35', 'science-bs36']:  # Gemini
         # odir = "/scratch/{}/experiments".format(os.environ['USER'])
@@ -376,9 +560,19 @@ if __name__=='__main__':
         CARTESIUS_SCRATCH_USERNAME = 'ckehluu'
         odir = "/scratch/shared/{}/experiments".format(CARTESIUS_SCRATCH_USERNAME)
         computer_env = "Cartesius"
+    elif fnmatch.fnmatchcase(os.uname()[1], "int*.snellius.*") or fnmatch.fnmatchcase(os.uname()[1], "fcn*") or fnmatch.fnmatchcase(os.uname()[1], "tcn*") or fnmatch.fnmatchcase(os.uname()[1], "gcn*") or fnmatch.fnmatchcase(os.uname()[1], "hcn*"):  # Snellius
+        SNELLIUS_SCRATCH_USERNAME = 'ckehluu'
+        odir = "/scratch-shared/{}/experiments/".format(SNELLIUS_SCRATCH_USERNAME)
+        computer_env = "Snellius"
+    elif fnmatch.fnmatchcase(os.uname()[1], "PROMETHEUS"):  # Prometheus computer - use USB drive
+        CARTESIUS_SCRATCH_USERNAME = 'christian'
+        odir = "/media/{}/DATA/data/hydrodynamics/doublegyre/".format(CARTESIUS_SCRATCH_USERNAME)
+        computer_env = "Prometheus"
     else:
         odir = "/var/scratch/experiments"
     print("running {} on {} (uname: {}) - branch '{}' - (target) N: {} - argv: {}".format(scenario, computer_env, os.uname()[1], branch, target_N, sys.argv[1:]))
+    if not os.path.exists(odir):
+        os.mkdir(odir)
 
     if os.path.sep in filename:
         head_dir = os.path.dirname(filename)
@@ -387,21 +581,42 @@ if __name__=='__main__':
         else:
             odir = os.path.join(odir, head_dir)
             filename = os.path.split(filename)[1]
+    pfname, pfext = os.path.splitext(filename)
 
     func_time = []
     mem_used_GB = []
 
     np.random.seed(0)
     fieldset = None
-    flons = np.array([])
-    flats = np.array([])
-    ftimes = np.array([])
-    U = np.array([])
-    V = np.array([])
+    flons = None
+    flats = None
+    fdepths = None
+    ftimes = None
+    U = None
+    V = None
+    W = None
     field_fpath = False
     if writeout:
         field_fpath = os.path.join(odir,"doublegyre")
-        flons, flats, ftimes, U, V, fieldset = doublegyre_from_numpy(xdim=field_sx, ydim=field_sy, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical')
+    if field_fpath and os.path.exists(field_fpath+"U.nc"):
+        flons, flats, fdepths, ftimes, fieldset, a, b, c = fieldset_from_file(periodic_wrap=periodicFlag, filepath=field_fpath+".nc")
+        use_3D &= hasattr(fieldset, "W")
+        U = fieldset.U
+        V = fieldset.V
+        if hasattr(fieldset, "W"):
+            W = fieldset.W
+    else:
+        if not use_3D:
+            flons, flats, ftimes, U, V, fieldset = doublegyre_from_numpy(xdim=field_sx, ydim=field_sy, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical')
+        else:
+            flons, flats, fdepths, ftimes, U, W, W, fieldset = doublegyre_waves3D(xdim=field_sx, ydim=field_sy, zdim=field_sz, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical')
+    fieldset.add_constant("east_lim", +a * 0.5)
+    fieldset.add_constant("west_lim", -a * 0.5)
+    fieldset.add_constant("north_lim", +b * 0.5)
+    fieldset.add_constant("south_lim", -b * 0.5)
+    fieldset.add_constant("top", 0.0)
+    fieldset.add_constant("bottom", c)
+    fieldset.add_constant("isThreeD", 1.0 if use_3D else -1.0)
 
     if MPI:
         mpi_comm = MPI.COMM_WORLD
@@ -510,7 +725,7 @@ if __name__=='__main__':
 
 
     output_file = None
-    out_fname = "benchmark_doublegyre"
+    out_fname = "doublegyre"
     if writeout:
         if MPI and (MPI.COMM_WORLD.Get_size()>1):
             out_fname += "_MPI"
@@ -548,9 +763,9 @@ if __name__=='__main__':
     elif interp_mode == 'rk45':
         kernelfunc = AdvectionRK45
     elif interp_mode == 'em':
-        kernelfunc = AdvectionRK4DiffusionEM
+        kernelfunc = AdvectionDiffusionEM
     elif interp_mode == 'm1':
-        kernelfunc = AdvectionRK4DiffusionM1
+        kernelfunc = AdvectionDiffusionM1
 
     kernels = pset.Kernel(kernelfunc,delete_cfiles=True)
     # if agingParticles:
@@ -593,8 +808,13 @@ if __name__=='__main__':
     #          P O S T - P R O C E S S I N G
     # ================================================================================================================ #
     step = 1.0/gres
+    zstep = gres*10.0
     xsteps = int(np.floor(a * gres))
+    # xsteps = int(np.ceil(a * gres))
     ysteps = int(np.floor(b * gres))
+    # ysteps = int(np.ceil(b * gres))
+    zsteps = int(np.floor(c * (1.0/(gres*10.0))))
+    # zsteps = int(np.ceil(c * gres))
 
     data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
     N = data_xarray['lon'].data.shape[0]
@@ -607,6 +827,9 @@ if __name__=='__main__':
     ctime_array = data_xarray['time'].data
     print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0 ,0]), ctime_array[0].min(), ctime_array[0].max()))
     timebase = ctime_array[:, 0]
+    # time_in_min = np.nanmin(ctime_array, axis=0)
+    # time_in_max = np.nanmax(ctime_array, axis=0)
+    # timebase = time_in_max[0]
     dtime_array = np.transpose(ctime_array.transpose() - timebase)
     print("time info from file after baselining: shape = {} type = {} range = ({}, {})".format(dtime_array.shape, type(dtime_array[0 ,0]), dtime_array[0].min(), dtime_array[0].max()))
     # print(dtime_array.dtype)
@@ -622,19 +845,14 @@ if __name__=='__main__':
     elif 'z' in data_xarray.keys():
         fZ = data_xarray['z'].data  # to be loaded from pfile
     fT = dtime_array
-    # this really need to convert to float
-    if isinstance(fT[0,0], datetime.datetime) or isinstance(fT[0, 0], datetime.timedelta) or np.float64(fT[0, 1]-fT[0, 0]) > (dt_minutes+dt_minutes/2.0):
-        print("fT.dtype before conversion: {}".format(fT.dtype))
-        fT = (fT / ns_per_sec).astype(np.float64)  # to be loaded from pfile
-        print("fT.range and ft.dtype after conversion: ({}, {}) \t {}".format(fT[0].min(), fT[0].max(), fT.dtype))
+    fT = convert_timearray(fT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fT")
     fA = data_xarray['age'].data  # to be loaded from pfile | age
-    print("original fA.range and fA.dtype (before conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
-    if not isinstance(fA[0,0], np.float32):
-        fA = np.transpose(fA.transpose()-timebase)
-    if isinstance(fA[0, 0], datetime.datetime) or isinstance(fA[0, 0], datetime.timedelta):  # or np.float32((fA[0, 1]-fA[0, 0])) > (dt_minutes+dt_minutes/2.0):
-        print("fA.dtype before conversion: {}".format(fA.dtype))
-        fA = (fA / ns_per_sec).astype(np.float32)
-        print("fA.range and fA.dtype (after conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
+    fAd = data_xarray['age_d'].data  # to be loaded from pfile | age_d
+    if DBG_MSG:
+        print("original fA.range and fA.dtype (before conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
+    if not isinstance(fA[0,0], np.float32) and not isinstance(fA[0,0], np.float64):
+        fA = fA - timebase
+    fA = convert_timearray(fA, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fA")
 
     # pcounts = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.int32)
     pcounts = np.zeros((ysteps, xsteps), dtype=np.int32)
@@ -785,13 +1003,41 @@ if __name__=='__main__':
     lifetime_file_ds.attrs['std'] = lifetime_statistics[1] / float(fT.shape[1])
     lifetime_file.close()
 
+    n_valid_pts = fX.shape[0]
+    print("Number valid particles: {} (of total {})".format(n_valid_pts, fX.shape[0]))
     particle_file = h5py.File(os.path.join(odir, "particles.h5"), "w")
     px_ds = particle_file.create_dataset("p_x", data=fX, compression="gzip", compression_opts=4)
+    px_ds.attrs['unit'] = "arc degree"
+    px_ds.attrs['name'] = 'longitude'
+    px_ds.attrs['min'] = fX.min()
+    px_ds.attrs['max'] = fX.max()
     py_ds = particle_file.create_dataset("p_y", data=fY, compression="gzip", compression_opts=4)
+    py_ds.attrs['unit'] = "arc degree"
+    py_ds.attrs['name'] = 'latitude'
+    py_ds.attrs['min'] = fY.min()
+    py_ds.attrs['max'] = fY.max()
+    pz_ds = None
     if fZ is not None:
         pz_ds = particle_file.create_dataset("p_z", data=fZ, compression="gzip", compression_opts=4)
+        pz_ds.attrs['unit'] = "metres"
+        pz_ds.attrs['name'] = 'depth'
+        pz_ds.attrs['min'] = fZ.min()
+        pz_ds.attrs['max'] = fZ.max()
     pt_ds = particle_file.create_dataset("p_t", data=fT, compression="gzip", compression_opts=4)
-    page_ds = particle_file.create_dataset("p_age", data=fA, compression="gzip", compression_opts=4)
+    pt_ds.attrs['unit'] = "seconds"
+    pt_ds.attrs['name'] = 'time'
+    pt_ds.attrs['min'] = fT.min()
+    pt_ds.attrs['max'] = fT.max()
+    # page_ds = particle_file.create_dataset("p_age", data=fA, compression="gzip", compression_opts=4)
+    # page_ds.attrs['unit'] = "seconds"
+    # page_ds.attrs['name'] = 'age'
+    # page_ds.attrs['min'] = fA.min()
+    # page_ds.attrs['max'] = fA.max()
+    page_ds = particle_file.create_dataset("p_age_d", data=fAd, compression="gzip", compression_opts=4)
+    page_ds.attrs['unit'] = "days"
+    page_ds.attrs['name'] = 'age'
+    page_ds.attrs['min'] = fAd.min()
+    page_ds.attrs['max'] = fAd.max()
     particle_file.close()
 
     del rel_density
@@ -846,10 +1092,13 @@ if __name__=='__main__':
 
     xval = np.arange(start=-a*0.5, stop=a*0.5, step=step, dtype=np.float32)
     yval = np.arange(start=-b*0.5, stop=b*0.5, step=step, dtype=np.float32)
+    zval = np.arange(start=0.0, stop=c, step=zstep, dtype=np.float32)
     centers_x = xval + step/2.0
     centers_y = yval + step/2.0
+    centers_z = zval + zstep/2.0
     us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
     vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+    ws = np.zeros((centers_y.shape[0], centers_x.shape[0], centers_z.shape[0]))
 
     grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
     grid_lon_ds = grid_file.create_dataset("longitude", data=centers_x, compression="gzip", compression_opts=4)
@@ -862,6 +1111,11 @@ if __name__=='__main__':
     grid_lat_ds.attrs['name'] = 'latitude'
     grid_lat_ds.attrs['min'] = centers_y.min()
     grid_lat_ds.attrs['max'] = centers_y.max()
+    grid_dep_ds = grid_file.create_dataset("depth", data=centers_z, compression="gzip", compression_opts=4)
+    grid_dep_ds.attrs['unit'] = "metres"
+    grid_dep_ds.attrs['name'] = 'depth'
+    grid_dep_ds.attrs['min'] = centers_z.min()
+    grid_dep_ds.attrs['max'] = centers_z.max()
     grid_time_ds = grid_file.create_dataset("times", data=fT[0], compression="gzip", compression_opts=4)
     grid_time_ds.attrs['unit'] = "seconds"
     grid_time_ds.attrs['name'] = 'time'
@@ -883,25 +1137,34 @@ if __name__=='__main__':
     vs_file_ds.attrs['unit'] = "m/s"
     vs_file_ds.attrs['name'] = 'zonal_velocity'
 
-    print("Interpolating UV on a regular-square grid ...")
+    ws_minmax = [0., 0.]
+    ws_statistics = [0., 0.]
+    ws_file = h5py.File(os.path.join(odir, "hydrodynamic_W.h5"), "w")
+    ws_file_ds = ws_file.create_dataset("wo", shape=(1, ws.shape[0], ws.shape[1], ws.shape[2]), dtype=ws.dtype, maxshape=(fT.shape[1], ws.shape[0], ws.shape[1], ws.shape[2]), compression="gzip", compression_opts=4)
+    ws_file_ds.attrs['unit'] = "m/s"
+    ws_file_ds.attrs['name'] = 'vertical_velocity'
+
+    print("Interpolating UVW on a regular-square grid ...")
     total_items = fT.shape[1]
     for ti in range(fT.shape[1]):
-        uv_ti = ti
+        uvw_ti = ti
         if periodicFlag:
-            uv_ti = ti % U.shape[0]
+            uvw_ti = ti % U.shape[0]
         else:
-            uv_ti = min(ti, U.shape[0]-1)
+            uvw_ti = min(ti, U.shape[0]-1)
         us[:, :] = 0
         vs[:, :] = 0
-        mgrid = (flats, flons)
-        p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
-        gcenters = (p_center_y.flatten(), p_center_x.flatten())
+        vs[:, :] = 0
+        mgrid = (flats, flons, fdepths)
+        p_center_z, p_center_y, p_center_x = np.meshgrid(centers_z, centers_y, centers_x, sparse=False, indexing='ij')
+        gcenters = (p_center_z.flatten(), p_center_y.flatten(), p_center_x.flatten())
         # print("gcenters dims = ({}, {}, {})".format(gcenters[0].shape, gcenters[1].shape, gcenters[2].shape))
         # print("mgrid dims = ({}, {}, {})".format(mgrid[0].shape, mgrid[1].shape, mgrid[2].shape))
         # print("u dims = ({}, {}, {})".format(U.shape[0], U.shape[1], U.shape[2]))
         # print("v dims = ({}, {}, {})".format(V.shape[0], V.shape[1], V.shape[2]))
-        us_local = interpn(mgrid, U[uv_ti], gcenters, method='linear', fill_value=.0)
-        vs_local = interpn(mgrid, V[uv_ti], gcenters, method='linear', fill_value=.0)
+        us_local = interpn(mgrid, U[uvw_ti], gcenters, method='linear', fill_value=.0)
+        vs_local = interpn(mgrid, V[uvw_ti], gcenters, method='linear', fill_value=.0)
+        ws_local = interpn(mgrid, W[uvw_ti], gcenters, method='linear', fill_value=.0)
         # print("us_local dims: {}".format(us_local.shape))
         # print("vs_local dims: {}".format(vs_local.shape))
 
@@ -909,8 +1172,9 @@ if __name__=='__main__':
         # vs_local = np.reshape(vs_local, p_center_y.shape)
         # print("us_local dims: {}".format(us_local.shape))
         # print("vs_local dims: {}".format(vs_local.shape))
-        us[:, :] = np.reshape(us_local, p_center_y.shape)
+        us[:, :] = np.reshape(us_local, p_center_x.shape)
         vs[:, :] = np.reshape(vs_local, p_center_y.shape)
+        ws[:, :] = np.reshape(ws_local, p_center_z.shape)
 
         us_minmax = [min(us_minmax[0], us.min()), max(us_minmax[1], us.max())]
         us_statistics[0] += us.mean()
@@ -922,10 +1186,17 @@ if __name__=='__main__':
         vs_statistics[1] += vs.std()
         vs_file_ds.resize((ti+1), axis=0)
         vs_file_ds[ti, :, :] = vs
+        ws_minmax = [min(ws_minmax[0], ws.min()), max(ws_minmax[1], ws.max())]
+        ws_statistics[0] += ws.mean()
+        ws_statistics[1] += ws.std()
+        ws_file_ds.resize((ti+1), axis=0)
+        ws_file_ds[ti, :, :] = ws
 
         del us_local
         del vs_local
+        del ws_local
         # del gcenters
+        del p_center_z
         del p_center_y
         del p_center_x
         # del mgrid
@@ -944,12 +1215,19 @@ if __name__=='__main__':
     vs_file_ds.attrs['mean'] = vs_statistics[0] / float(fT.shape[1])
     vs_file_ds.attrs['std'] = vs_statistics[1] / float(fT.shape[1])
     vs_file.close()
+    ws_file_ds.attrs['min'] = ws_minmax[0]
+    ws_file_ds.attrs['max'] = ws_minmax[1]
+    ws_file_ds.attrs['mean'] = ws_statistics[0] / float(fT.shape[1])
+    ws_file_ds.attrs['std'] = ws_statistics[1] / float(fT.shape[1])
+    ws_file.close()
 
-    del gcenters
+    # del gcenters
     del centers_x
     del centers_y
+    del centers_z
     del xval
     del yval
+    del zval
     # del xval_start
     # del yval_start
     del fT

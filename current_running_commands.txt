@@ -1,0 +1,8 @@
+Simulation commands:
+
+python3 CMEMS_scenario.py -f vis_example/metadata.txt -t 366 -dt 60 -ot 720 -im 'rk4' -N 2**12 -sres 2.0 -gres 3 -sm 'regular_jitter' -fsx 360 -fsy 180
+python3 NEMO_scenario.py -f nemo_example/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 360 -fsy 180 -fsz 20
+
+python3 NEMO_scenario.py -f nemo_example/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 360 -fsy 180 -fsz 20 -chs 1
+
+python3 doublegyre_scenario.py -f doublegyre_example/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D

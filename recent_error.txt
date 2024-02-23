@@ -1,0 +1,62 @@
+(parcels) christian@PROMETHEUS:/media/christian/DATA/git/LOMUQ/generate$ python3 doublegyre_scenario.py -f doublegyre_example/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
+fatal: not a git repository (or any parent up to mount point /media/christian)
+Stopping at filesystem boundary (GIT_DISCOVERY_ACROSS_FILESYSTEM not set).
+N: 4096
+sh: 1: None: not found
+INFO: Compiled ParcelsRandom ==> /tmp/parcels-1000/libparcels_random_36a4b0f2-2144-4df8-b80c-336fbc9cf097.so
+running doublegyre3D on Prometheus (uname: PROMETHEUS) - branch 'generate' - (target) N: 4096 - argv: ['-f', 'doublegyre_example/metadata.txt', '-t', '366', '-dt', '60', '-ot', '1440', '-im', 'rk4', '-N', '2**12', '-sres', '2.0', '-gres', '2', '-sm', 'regular_jitter', '-fsx', '540', '-fsy', '270', '-fsz', '20', '-3D']
+lon field: 540
+lat field: 270
+depth field: 20
+time field: 122
+INFO: Generating FieldSet output with basename: /media/christian/DATA/data/hydrodynamics/doublegyre/doublegyre_example/doublegyre
+Traceback (most recent call last):
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/file_manager.py", line 211, in _acquire_with_cache_info
+    file = self._cache[self._key]
+           ~~~~~~~~~~~^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/lru_cache.py", line 56, in __getitem__
+    value = self._cache[key]
+            ~~~~~~~~~~~^^^^^
+KeyError: [<class 'netCDF4._netCDF4.Dataset'>, ('/media/christian/DATA/data/hydrodynamics/doublegyre/doublegyre_example/doublegyreU.nc',), 'a', (('clobber', True), ('diskless', False), ('format', 'NETCDF4'), ('persist', False)), '41d0b1b8-417f-4f52-8120-187b87cc73bd']
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/media/christian/DATA/git/LOMUQ/generate/doublegyre_scenario.py", line 612, in <module>
+    flons, flats, fdepths, ftimes, U, W, W, fieldset = doublegyre_waves3D(xdim=field_sx, ydim=field_sy, zdim=field_sz, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical')
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/christian/DATA/git/LOMUQ/generate/doublegyre_scenario.py", line 220, in doublegyre_waves3D
+    fieldset.write(filename=write_out)
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/parcels-2.3.1.dev232+gdd3ba5b3-py3.12.egg/parcels/fieldset.py", line 997, in write
+    self.U.write(filename, varname='vozocrtx')
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/parcels-2.3.1.dev232+gdd3ba5b3-py3.12.egg/parcels/field.py", line 1327, in write
+    dset.to_netcdf(filepath, unlimited_dims='time_counter')
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/core/dataset.py", line 2310, in to_netcdf
+    return to_netcdf(  # type: ignore  # mypy cannot resolve the overloads:(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/api.py", line 1298, in to_netcdf
+    store = store_open(target, mode, format, group, **kwargs)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/netCDF4_.py", line 400, in open
+    return cls(manager, group=group, mode=mode, lock=lock, autoclose=autoclose)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/netCDF4_.py", line 347, in __init__
+    self.format = self.ds.data_model
+                  ^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/netCDF4_.py", line 409, in ds
+    return self._acquire()
+           ^^^^^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/netCDF4_.py", line 403, in _acquire
+    with self._manager.acquire_context(needs_lock) as root:
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/contextlib.py", line 137, in __enter__
+    return next(self.gen)
+           ^^^^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/file_manager.py", line 199, in acquire_context
+    file, cached = self._acquire_with_cache_info(needs_lock)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/media/christian/DATA/archive/anaconda3_2023-09/envs/parcels/lib/python3.12/site-packages/xarray/backends/file_manager.py", line 217, in _acquire_with_cache_info
+    file = self._opener(*self._args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "src/netCDF4/_netCDF4.pyx", line 2469, in netCDF4._netCDF4.Dataset.__init__
+  File "src/netCDF4/_netCDF4.pyx", line 2028, in netCDF4._netCDF4._ensure_nc_success
+PermissionError: [Errno 13] Permission denied: '/media/christian/DATA/data/hydrodynamics/doublegyre/doublegyre_example/doublegyreU.nc'
