@@ -9,6 +9,7 @@ from parcels import FieldSet, ScipyParticle, JITParticle, Variable, AdvectionRK4
 # from parcels.particleset import ParticleSet as DryParticleSet
 from parcels.particleset import ParticleSet as BenchmarkParticleSet
 from parcels.field import Field, VectorField, NestedField, SummedField
+from parcels.grid import RectilinearZGrid
 # from parcels import plotTrajectoriesFile_loadedField
 # from parcels import rng as random
 from parcels import ParcelsRandom
@@ -82,7 +83,7 @@ tscale = 24.0*60.0*60.0 # in seconds
 # in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
 
 
-# Helper function for time-conversion from teh calendar format
+# Helper function for time-conversion from the calendar format
 def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="time array"):
     """
 
@@ -137,7 +138,7 @@ periodicBC = RenewParticle
 def perIterGC():
     gc.collect()
 
-def create_CMEMS_fieldset(datahead, periodic_wrap):
+def create_CMEMS_fieldset(datahead, periodic_wrap, anisotropic_diffusion=False):
     ddir = os.path.join(datahead, "CMEMS/GLOBAL_REANALYSIS_PHY_001_030/")
     files = sorted(glob(ddir+"mercatorglorys12v1_gl12_mean_201607*.nc"))
     variables = {'U': 'uo', 'V': 'vo'}
@@ -159,6 +160,57 @@ def create_CMEMS_fieldset(datahead, periodic_wrap):
     tsteps = len(fieldset.U.grid.time_full)
     global tstepsize
     tstepsize = int(math.floor(ttotal/tsteps))
+
+    Kh_zonal = None
+    Kh_meridional = None
+    xdim = fieldset.U.grid.xdim
+    ydim = fieldset.U.grid.ydim
+    tdim = fieldset.U.grid.tdim
+    if anisotropic_diffusion: # simplest case: 10 m/s^2 -> Lacerda et al. 2019
+        print("Generating anisotropic diffusion fields ...")
+        Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * 0.5 * 100.
+        Kh_meridional = np.empty((ydim, xdim), dtype=np.float32)
+        alpha = 1.  # Profile steepness
+        L = 1.  # Basin scale
+        # Ny = lat.shape[0]  # Number of grid cells in y_direction (101 +2, one level above and one below, where fields are set to zero)
+        # dy = 1.03 / Ny  # Spatial resolution
+        # y = np.linspace(-0.01, 1.01, 103)  # y-coordinates for grid
+        # y_K = np.linspace(0., 1., 101)  # y-coordinates used for setting diffusivity
+        beta = np.zeros(ydim)  # Placeholder for fraction term in K(y) formula
+
+        # for yi in range(len(y_K)):
+        for yi in range(ydim):
+            yk = (fieldset.U.lat[yi] - fieldset.U.lat[0]) / (fieldset.U.lat[1] - fieldset.U.lat[0])
+            if yk < L / 2:
+                beta[yi] = yk * np.power(L - 2 * yk, 1 / alpha)
+            elif yk[yi] >= L / 2:
+                beta[yi] = (L - yk) * np.power(2 * yk - L, 1 / alpha)
+        Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
+        for i in range(xdim):
+            for j in range(ydim):
+                Kh_meridional[j, i] = Kh_meridional_profile[j] * 100.
+    else:
+        print("Generating isotropic diffusion value ...")
+        # Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        # Kh_meridional = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+        # mesh_conversion = 1.0 / 1852. / 60 if fieldset.U.grid.mesh == 'spherical' else 1.0
+        Kh_zonal = np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        Kh_meridional = np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+
+
+    if anisotropic_diffusion:
+        Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, mesh=fieldset.U.grid.mesh)
+        # fieldset.add_field(Field("Kh_zonal", Kh_zonal, lon=lon, lat=lat, to_write=False, mesh=mesh, transpose=False))
+        # fieldset.add_field(Field("Kh_meridional", Kh_meridional, lon=lon, lat=lat, to_write=False, mesh=mesh, transpose=False))
+        fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=False, mesh=fieldset.U.grid.mesh, transpose=False))
+        fieldset.add_field(Field("Kh_meridional", Kh_meridional, grid=Kh_grid, to_write=False, mesh=fieldset.U.grid.mesh, transpose=False))
+        fieldset.add_constant("dres", max(fieldset.U.lat[1]-fieldset.U.lat[0], fieldset.U.lon[1]-fieldset.U.lon[0]))
+    else:
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh=fieldset.U.grid.mesh)
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh=fieldset.U.grid.mesh)
+        # fieldset.add_constant("Kh_zonal", Kh_zonal)
+        # fieldset.add_constant("Kh_meridional", Kh_meridional)
+
     return fieldset
 
 class SampleParticle(JITParticle):
