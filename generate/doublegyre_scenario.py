@@ -56,9 +56,13 @@ tsteps = 122 # in steps
 tstepsize = 6.0 # unitary
 tscale = 12.0*60.0*60.0 # in seconds
 # time[days] = (tsteps * tstepsize) * tscale
+# ==== yearly rotation - initial estimate ==== #
 # gyre_rotation_speed = 60.0*24.0*60.0*60.0  # assume 1 rotation every 8.5 weeks
-# gyre_rotation_speed = (366.0*24.0*60.0*60.0)/2.0  # assume 1 rotation every 26 weeks
-gyre_rotation_speed = 366.0*24.0*60.0*60.0  # assume 1 rotation every 52 weeks
+# ==== yearly rotation - 3D use ==== #
+gyre_rotation_speed = 30.5*24.0*60.0*60.0  # assume 1 rotation every 4.02 weeks
+# ==== yearly rotation - 2D use ==== #
+# gyre_rotation_speed = 366.0*24.0*60.0*60.0  # assume 1 rotation every 52 weeks
+
 # ==== INFO FROM NEMO-MEDUSA: realistic values are 0-2.5 [m/s] ==== #
 # scalefac = (40.0 / (1000.0/ (60.0 * 60.0)))  # 40 km/h
 scalefactor = ((4.0*1000) / (60.0*60.0))  # 4 km/h
@@ -228,7 +232,7 @@ def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_o
     freqs = np.ones(times.size, dtype=np.float32)
     if not steady:
         for ti in range(times.shape[0]):
-            time_f = times[ti] / gyre_rotation_speed
+            time_f = times[ti] # / gyre_rotation_speed
             freqs[ti] *= omega * time_f
     else:
         freqs = (freqs * 0.5) * omega
@@ -805,7 +809,7 @@ if __name__=='__main__':
         out_fname += "_noMPI"
     if periodicFlag:
         out_fname += "_p"
-    out_fname += "_n"+str(Nparticle)
+    out_fname += "_n"+str(int(sres*a*sres*b))
     if backwardSimulation:
         out_fname += "_bwd"
     else:
@@ -814,6 +818,8 @@ if __name__=='__main__':
         out_fname += "_add"
     if agingParticles:
         out_fname += "_age"
+    if use_3D:
+        out_fname += "_3D"
 
     if not os.path.exists(os.path.join(odir, out_fname + ".nc")):
         # ==== ==== ==== ==== ==== #
