@@ -19,7 +19,10 @@ import math
 import datetime
 import numpy as np
 from numpy.random import default_rng
+
 import xarray as xr
+import dask.array as da
+
 import fnmatch
 import sys
 import gc
@@ -27,6 +30,8 @@ import os
 import time as ostime
 from scipy.interpolate import interpn
 import h5py
+
+from multiprocessing import Pool
 
 try:
     from mpi4py import MPI
@@ -42,8 +47,10 @@ global_t_0 = 0
 Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
 #Nparticle = int(math.pow(2,19)) # equals to Nparticle = 524288
 
-a = 3.6 * 1e2  # by definition: meters
-b = 1.8 * 1e2  # by definiton: meters
+# a = 3.6 * 1e2  # by definition: meters
+a = 359.0
+# b = 1.8 * 1e2  # by definiton: meters
+b = 179.0
 c = 2.1 * 1e3  # by definiton: meters
 tsteps = 122 # in steps
 tstepsize = 6.0 # unitary
@@ -153,6 +160,42 @@ def perIterGC():
     gc.collect()
 
 
+# initialize a worker in the process pool
+def worker_init(lon, lat, depth, freqs, a, b, c, epsilon, A):
+    global var_lon
+    var_lon = lon
+    global var_lat
+    var_lat = lat
+    global var_depth
+    var_depth = depth
+    global var_freqs
+    var_freqs = freqs
+    global var_a
+    var_a = a
+    global var_b
+    var_b = b
+    global var_c
+    var_c = c
+    global var_epsilon
+    var_epsilon = epsilon
+    global var_Alpha
+    var_Alpha = A
+
+
+# lon, lat, depth, freq, a, b, c, epsilon, A
+def doublgyre3D_func(ti, i, j, k):
+    freq = var_freqs[ti]
+    x1 = ((var_lon[i] + (var_a / 2.0)) / var_a)
+    x2 = ((var_lat[j] + (var_b / 2.0)) / var_b)
+    x3 = (var_depth[k] / var_c)
+    f_xt = (var_epsilon * np.sin(freq) * x1 ** 2.0) + (1.0 - (2.0 * var_epsilon * np.sin(freq))) * x1
+    val_u = -np.pi * var_Alpha * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
+    val_v = np.pi * var_Alpha * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (
+            2 * var_epsilon * np.sin(freq) * x1 + 1 - 2 * var_epsilon * np.sin(freq))
+    val_w = 0.2 * x3 * (1.0 - x3) * (x3 - var_epsilon * np.sin(4 * np.pi * freq) - 0.5)
+    return (ti, i, j, k, val_u, val_v, val_w)
+
+
 def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_out=False, steady=False, mesh='flat'):
     """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002
        Also: Ph.D. Thesis A.S. Parkash, p.35 - 37
@@ -190,18 +233,28 @@ def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_o
     else:
         freqs = (freqs * 0.5) * omega
 
-    for ti in range(times.shape[0]):
-        freq = freqs[ti]
-        for i in range(lon.shape[0]):
-            for j in range(lat.shape[0]):
-                for k in range(depth.shape[0]):
-                    x1 = ((lon[i] + (a/2.0)) / a)
-                    x2 = ((lat[j] + (b/2.0)) / b)
-                    x3 = (depth[k] / c)
-                    f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
-                    U[ti, k, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
-                    V[ti, k, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
-                    W[ti, k, j, i] = 0.2 * x3 * (1.0 - x3) * (x3 - epsilon * np.sin(4 * np.pi * freq) - 0.5)
+    # # xcoords, ycoords, zcoords = np.meshgrid(lon, lat, depth, sparse=False, indexing='ij')
+    # for ti in range(times.shape[0]):
+    #     freq = freqs[ti]
+    #     for i in range(lon.shape[0]):
+    #         for j in range(lat.shape[0]):
+    #             for k in range(depth.shape[0]):
+    #                 x1 = ((lon[i] + (a/2.0)) / a)
+    #                 x2 = ((lat[j] + (b/2.0)) / b)
+    #                 x3 = (depth[k] / c)
+    #                 f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
+    #                 U[ti, k, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
+    #                 V[ti, k, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
+    #                 W[ti, k, j, i] = 0.2 * x3 * (1.0 - x3) * (x3 - epsilon * np.sin(4 * np.pi * freq) - 0.5)
+
+    items = zip(range(times.shape[0]), range(lon.shape[0]), range(lat.shape[0]), range(depth.shape[0]))
+    with Pool(initializer=worker_init, initargs=(lon, lat, depth, freqs, a, b, c, epsilon, A)) as pool:
+        for result in pool.starmap(doublgyre3D_func, items):
+            (ti, k, j, i, val_u, val_v, val_w) = result
+            U[ti, k, j, i] = val_u
+            V[ti, k, j, i] = val_v
+            W[ti, k, j, i] = val_w
+
 
     U *= scalefac
     # U = np.transpose(U, (0, 2, 1))
@@ -337,73 +390,73 @@ def doublegyre_from_numpy(xdim=960, ydim=480, periodic_wrap=False, write_out=Fal
 
     return lon, lat, times, U, V, fieldset
 
-def doublegyre_from_numpy_3D(xdim=960, ydim=480, periodic_wrap=False, write_out=False, steady=False, mesh='flat', anisotropic_diffusion=False):
-    """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002"""
-    A = 0.3
-    epsilon = 0.25
-    omega = 2 * np.pi
-
-    scalefac = scalefactor
-    if 'flat' in mesh and np.maximum(a, b) > 370.0 and np.maximum(a, b) < 100000:
-        scalefac *= v_scale_small
-
-    lon = np.linspace(-a*0.5, a*0.5, xdim, dtype=np.float32)
-    lonrange = lon.max()-lon.min()
-    sys.stdout.write("lon field: {}\n".format(lon.size))
-    lat = np.linspace(-b*0.5, b*0.5, ydim, dtype=np.float32)
-    latrange = lat.max() - lat.min()
-    sys.stdout.write("lat field: {}\n".format(lat.size))
-    totime = (tsteps * tstepsize) * tscale
-    times = np.linspace(0., totime, tsteps, dtype=np.float64)
-    sys.stdout.write("time field: {}\n".format(times.size))
-    dx, dy = lon[2]-lon[1], lat[2]-lat[1]
-
-    U = np.zeros((times.size, lat.size, lon.size), dtype=np.float32)
-    V = np.zeros((times.size, lat.size, lon.size), dtype=np.float32)
-    freqs = np.ones(times.size, dtype=np.float32)
-    if not steady:
-        for ti in range(times.shape[0]):
-            time_f = times[ti] / gyre_rotation_speed
-            # time_f = np.fmod((times[ti])/gyre_rotation_speed, 2.0)
-            # time_f = np.fmod((times[ti]/gyre_rotation_speed), 2*np.pi)
-            # freqs[ti] = omega * np.cos(time_f) * 2.0
-            freqs[ti] *= omega * time_f
-            # freqs[ti] *= time_f
-    else:
-        freqs = (freqs * 0.5) * omega
-
-    for ti in range(times.shape[0]):
-        freq = freqs[ti]
-        # print(freq)
-        for i in range(lon.shape[0]):
-            for j in range(lat.shape[0]):
-                x1 = ((lon[i] + (a/2.0)) / a)  # - dx / 2
-                x2 = ((lat[j] + (b/2.0)) / b)  # - dy / 2 || / (2.0*)
-                f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
-                U[ti, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
-                V[ti, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
-
-    U *= scalefac
-    # U = np.transpose(U, (0, 2, 1))
-    V *= scalefac
-    # V = np.transpose(V, (0, 2, 1))
-    Kh_zonal = np.ones(U.shape, dtype=np.float32) * 0.5
-    Kh_meridional = np.ones(U.shape, dtype=np.float32) * 0.5
-
-
-    data = {'U': U, 'V': V, 'Kh_zonal': Kh_zonal, 'Kh_meridional': Kh_meridional}
-    dimensions = {'time': times, 'lon': lon, 'lat': lat}
-    fieldset = None
-    if periodic_wrap:
-        fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, time_periodic=delta(days=366))
-    else:
-        fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, allow_time_extrapolation=True)
-    # fieldset.add_constant_field("Kh_zonal", 1, mesh="flat")
-    # fieldset.add_constant_field("Kh_meridonal", 1, mesh="flat")
-    fieldset.add_constant("dres", 0.01)
-    if write_out:
-        fieldset.write(filename=write_out)
-    return lon, lat, times, U, V, fieldset
+# def doublegyre_from_numpy_3D(xdim=960, ydim=480, periodic_wrap=False, write_out=False, steady=False, mesh='flat', anisotropic_diffusion=False):
+#     """Implemented following Froyland and Padberg (2009), 10.1016/j.physd.2009.03.002"""
+#     A = 0.3
+#     epsilon = 0.25
+#     omega = 2 * np.pi
+#
+#     scalefac = scalefactor
+#     if 'flat' in mesh and np.maximum(a, b) > 370.0 and np.maximum(a, b) < 100000:
+#         scalefac *= v_scale_small
+#
+#     lon = np.linspace(-a*0.5, a*0.5, xdim, dtype=np.float32)
+#     lonrange = lon.max()-lon.min()
+#     sys.stdout.write("lon field: {}\n".format(lon.size))
+#     lat = np.linspace(-b*0.5, b*0.5, ydim, dtype=np.float32)
+#     latrange = lat.max() - lat.min()
+#     sys.stdout.write("lat field: {}\n".format(lat.size))
+#     totime = (tsteps * tstepsize) * tscale
+#     times = np.linspace(0., totime, tsteps, dtype=np.float64)
+#     sys.stdout.write("time field: {}\n".format(times.size))
+#     dx, dy = lon[2]-lon[1], lat[2]-lat[1]
+#
+#     U = np.zeros((times.size, lat.size, lon.size), dtype=np.float32)
+#     V = np.zeros((times.size, lat.size, lon.size), dtype=np.float32)
+#     freqs = np.ones(times.size, dtype=np.float32)
+#     if not steady:
+#         for ti in range(times.shape[0]):
+#             time_f = times[ti] / gyre_rotation_speed
+#             # time_f = np.fmod((times[ti])/gyre_rotation_speed, 2.0)
+#             # time_f = np.fmod((times[ti]/gyre_rotation_speed), 2*np.pi)
+#             # freqs[ti] = omega * np.cos(time_f) * 2.0
+#             freqs[ti] *= omega * time_f
+#             # freqs[ti] *= time_f
+#     else:
+#         freqs = (freqs * 0.5) * omega
+#
+#     for ti in range(times.shape[0]):
+#         freq = freqs[ti]
+#         # print(freq)
+#         for i in range(lon.shape[0]):
+#             for j in range(lat.shape[0]):
+#                 x1 = ((lon[i] + (a/2.0)) / a)  # - dx / 2
+#                 x2 = ((lat[j] + (b/2.0)) / b)  # - dy / 2 || / (2.0*)
+#                 f_xt = (epsilon * np.sin(freq) * x1**2.0) + (1.0 - (2.0 * epsilon * np.sin(freq))) * x1
+#                 U[ti, j, i] = -np.pi * A * np.sin(np.pi * f_xt) * np.cos(np.pi * x2)
+#                 V[ti, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
+#
+#     U *= scalefac
+#     # U = np.transpose(U, (0, 2, 1))
+#     V *= scalefac
+#     # V = np.transpose(V, (0, 2, 1))
+#     Kh_zonal = np.ones(U.shape, dtype=np.float32) * 0.5
+#     Kh_meridional = np.ones(U.shape, dtype=np.float32) * 0.5
+#
+#
+#     data = {'U': U, 'V': V, 'Kh_zonal': Kh_zonal, 'Kh_meridional': Kh_meridional}
+#     dimensions = {'time': times, 'lon': lon, 'lat': lat}
+#     fieldset = None
+#     if periodic_wrap:
+#         fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, time_periodic=delta(days=366))
+#     else:
+#         fieldset = FieldSet.from_data(data, dimensions, mesh=mesh, transpose=False, allow_time_extrapolation=True)
+#     # fieldset.add_constant_field("Kh_zonal", 1, mesh="flat")
+#     # fieldset.add_constant_field("Kh_meridonal", 1, mesh="flat")
+#     fieldset.add_constant("dres", 0.01)
+#     if write_out:
+#         fieldset.write(filename=write_out)
+#     return lon, lat, times, U, V, fieldset
 
 
 def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, diffusion=False):
@@ -437,7 +490,8 @@ def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, di
     else:
         fieldset = FieldSet.from_parcels(os.path.join(head_dir, fname), extra_fields=extra_fields, time_periodic=None, deferred_load=True, allow_time_extrapolation=True, chunksize='auto')
         # return FieldSet.from_xarray_dataset(ds, variables, dimensions, mesh='flat', allow_time_extrapolation=True)
-    ftimes = fieldset.U.time
+    #print(fieldset.U.grid.__dict__)
+    ftimes = fieldset.U.grid.time
     flons = fieldset.U.lon
     a = flons[len(flons)-1] - flons[0]
     flats = fieldset.V.lat
@@ -456,7 +510,7 @@ def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, di
         Kh_zonal, Kh_meridional = Kh_zonal * 100.0, Kh_meridional * 100.0  # because the mesh is flat
         fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh="flat")
         fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh="flat")
-    return ftimes, fdepths, flats, flons, fieldset, a, b, c
+    return flons, flats, fdepths, ftimes, fieldset, a, b, c
 
 
 class AgeParticle_JIT(JITParticle):
@@ -661,6 +715,7 @@ if __name__=='__main__':
     ParcelsRandom.seed(nowtime.microsecond)
     np.random.seed(0)
     use_3D = args.threeD
+    use_W = False
 
     branch = "LOMUQ"
     computer_env = "local/unspecified"
@@ -722,11 +777,15 @@ if __name__=='__main__':
         V = fieldset.V
         if hasattr(fieldset, "W"):
             W = fieldset.W
+            use_W = True
+        if fdepths is None:
+            use_3D = False
     else:
         if not use_3D:
             flons, flats, ftimes, U, V, fieldset = doublegyre_from_numpy(xdim=field_sx, ydim=field_sy, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical', anisotropic_diffusion=(interp_mode in ['em', 'm1']))
         else:
-            flons, flats, fdepths, ftimes, U, W, W, fieldset = doublegyre_waves3D(xdim=field_sx, ydim=field_sy, zdim=field_sz, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical')
+            flons, flats, fdepths, ftimes, U, V, W, fieldset = doublegyre_waves3D(xdim=field_sx, ydim=field_sy, zdim=field_sz, periodic_wrap=periodicFlag, write_out=field_fpath, mesh='spherical')
+            use_W = True
     fieldset.add_constant("east_lim", +a * 0.5)
     fieldset.add_constant("west_lim", -a * 0.5)
     fieldset.add_constant("north_lim", +b * 0.5)
@@ -735,191 +794,216 @@ if __name__=='__main__':
     fieldset.add_constant("bottom", c)
     fieldset.add_constant("isThreeD", 1.0 if use_3D else -1.0)
 
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        mpi_rank = mpi_comm.Get_rank()
-        if mpi_rank==0:
-            global_t_0 = ostime.process_time()
+    # ================================================== #
+    # ----- make running the particle-sim optional ----- #
+    # -- skip the simulation if sim-file is available -- #
+    # ================================================== #
+    out_fname = "particles-doublegyre"
+    if MPI and (MPI.COMM_WORLD.Get_size()>1):
+        out_fname += "_MPI"
     else:
-        global_t_0 = ostime.process_time()
-
-    simStart = None
-    for f in fieldset.get_fields():
-        if type(f) in [VectorField, NestedField, SummedField]:  # or not f.grid.defer_load
-            continue
-        else:
-            if backwardSimulation:
-                simStart=f.grid.time_full[-1]
-            else:
-                simStart = f.grid.time_full[0]
-            break
-
-    start_scaler = 1.0
-    add_scaler = 1.0
-
-    if agingParticles:
-        start_scaler *= np_scaler
-        if not repeatdtFlag:
-            Nparticle = int(Nparticle * np_scaler)
-        fieldset.add_constant('life_expectancy', delta(days=time_in_days).total_seconds())
+        out_fname += "_noMPI"
+    if periodicFlag:
+        out_fname += "_p"
+    out_fname += "_n"+str(Nparticle)
+    if backwardSimulation:
+        out_fname += "_bwd"
     else:
-        # making sure we do track age, but life expectancy is a hard full simulation time #
-        fieldset.add_constant('life_expectancy', delta(days=time_in_days).total_seconds())
-        age_ptype[(compute_mode).lower()].life_expectancy.initial = delta(days=time_in_days).total_seconds()
-        age_ptype[(compute_mode).lower()].initialized_dynamic.initial = 1
-
+        out_fname += "_fwd"
     if repeatdtFlag:
-        add_scaler = start_scaler/2.0
-        addParticleN = Nparticle/2.0
-        refresh_cycle = (delta(days=time_in_days).total_seconds() / (addParticleN/start_N_particles)) / cycle_scaler
+        out_fname += "_add"
+    if agingParticles:
+        out_fname += "_age"
+
+    if not os.path.exists(os.path.join(odir, out_fname + ".nc")):
+        # ==== ==== ==== ==== ==== #
+        # == EXECUTE SIMULATION == #
+        # ==== ==== ==== ==== ==== #
+        if MPI:
+            mpi_comm = MPI.COMM_WORLD
+            mpi_rank = mpi_comm.Get_rank()
+            if mpi_rank==0:
+                global_t_0 = ostime.process_time()
+        else:
+            global_t_0 = ostime.process_time()
+
+        simStart = None
+        for f in fieldset.get_fields():
+            if type(f) in [VectorField, NestedField, SummedField]:  # or not f.grid.defer_load
+                continue
+            else:
+                if backwardSimulation:
+                    simStart=f.grid.time_full[-1]
+                else:
+                    simStart = f.grid.time_full[0]
+                break
+
+        start_scaler = 1.0
+        add_scaler = 1.0
+
         if agingParticles:
-            refresh_cycle /= cycle_scaler
-        repeatRateMinutes = int(refresh_cycle/60.0) if repeatRateMinutes == 720 else repeatRateMinutes
-
-    print("Sampling the grid and creating the particle set now ...")
-    if backwardSimulation:
-        # ==== backward simulation ==== #
-        if agingParticles:
-            if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                pset.add(psetA)
-            else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+            start_scaler *= np_scaler
+            if not repeatdtFlag:
+                Nparticle = int(Nparticle * np_scaler)
+            fieldset.add_constant('life_expectancy', delta(days=time_in_days).total_seconds())
         else:
-            if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                pset.add(psetA)
-            else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
-    else:
-        # ==== forward simulation ==== #
-        if agingParticles:
-            if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                pset.add(psetA)
-            else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
-        else:
-            if repeatdtFlag:
-                startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                pset.add(psetA)
-            else:
-                lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
-    print("Sampling concluded.")
+            # making sure we do track age, but life expectancy is a hard full simulation time #
+            fieldset.add_constant('life_expectancy', delta(days=time_in_days).total_seconds())
+            age_ptype[(compute_mode).lower()].life_expectancy.initial = delta(days=time_in_days).total_seconds()
+            age_ptype[(compute_mode).lower()].initialized_dynamic.initial = 1
 
-    # =================================================== #
-    # ==== Writing simulation parameters to CSV file ==== #
-    # =================================================== #
-    csv_file = os.path.splitext(filename)[0]+".csv"
-    with open(os.path.join(odir, csv_file), 'w') as f:
-        header_string = ""
-        value_string = ""
-        header_string += "(t) sim time [d], (dt) time integral [min], (out_dt) output time integral [min],"
-        header_string += "(N) number particles, (sres) sample resolution, (gres) (projected) grid resolution,"
-        header_string += "(interp) interpolation function, (smode) sample mode"
-        header_string += "\n"
-        value_string += "{:5.5f}, {:7.7f}, {:7.7f},".format(time_in_days, dt_minutes, outdt_minutes)
-        value_string += "{}, {}, {},".format(len(pset), sres, gres)
-        value_string += "{}, {}".format(interp_mode, sample_mode)
-        f.write(header_string)
-        f.write(value_string)
-
-
-    output_file = None
-    out_fname = "doublegyre"
-    if writeout:
-        if MPI and (MPI.COMM_WORLD.Get_size()>1):
-            out_fname += "_MPI"
-        else:
-            out_fname += "_noMPI"
-        if periodicFlag:
-            out_fname += "_p"
-        out_fname += "_n"+str(Nparticle)
-        if backwardSimulation:
-            out_fname += "_bwd"
-        else:
-            out_fname += "_fwd"
         if repeatdtFlag:
-            out_fname += "_add"
-        if agingParticles:
-            out_fname += "_age"
-        output_file = pset.ParticleFile(name=os.path.join(odir,out_fname+".nc"), outputdt=delta(minutes=outdt_minutes))
+            add_scaler = start_scaler/2.0
+            addParticleN = Nparticle/2.0
+            refresh_cycle = (delta(days=time_in_days).total_seconds() / (addParticleN/start_N_particles)) / cycle_scaler
+            if agingParticles:
+                refresh_cycle /= cycle_scaler
+            repeatRateMinutes = int(refresh_cycle/60.0) if repeatRateMinutes == 720 else repeatRateMinutes
 
-    delete_func = RenewParticle
-    if deleteBC:
-        delete_func=DeleteParticle
-    postProcessFuncs = []
+        print("Sampling the grid and creating the particle set now ...")
+        if backwardSimulation:
+            # ==== backward simulation ==== #
+            if agingParticles:
+                if repeatdtFlag:
+                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                    pset.add(psetA)
+                else:
+                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+            else:
+                if repeatdtFlag:
+                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                    pset.add(psetA)
+                else:
+                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+        else:
+            # ==== forward simulation ==== #
+            if agingParticles:
+                if repeatdtFlag:
+                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                    pset.add(psetA)
+                else:
+                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+            else:
+                if repeatdtFlag:
+                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
+                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                    pset.add(psetA)
+                else:
+                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
+                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+        print("Sampling concluded.")
 
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        mpi_rank = mpi_comm.Get_rank()
-        if mpi_rank==0:
+        step = 1.0/gres
+        zstep = gres*10.0
+        xsteps = int(np.floor(a * gres))
+        # xsteps = int(np.ceil(a * gres))
+        ysteps = int(np.floor(b * gres))
+        # ysteps = int(np.ceil(b * gres))
+        zsteps = int(np.floor(c * (1.0/(gres*10.0))))
+        # zsteps = int(np.ceil(c * gres))
+        if DBG_MSG:
+            print("=========================================================")
+            print("step: gres={}, value={}".format(gres, step))
+            print("zstep: gres={}, value={}".format(gres, zstep))
+            print("xsteps: a={}, gres={}, value={}".format(a, gres, xsteps))
+            print("xsteps: b={}, gres={}, value={}".format(b, gres, ysteps))
+            print("xsteps: c={}, gres={}, value={}".format(c, gres, zsteps))
+            print("=========================================================")
+        # =================================================== #
+        # ==== Writing simulation parameters to CSV file ==== #
+        # =================================================== #
+        csv_file = os.path.splitext(filename)[0]+".csv"
+        with open(os.path.join(odir, csv_file), 'w') as f:
+            header_string = ""
+            value_string = ""
+            header_string += "(t) sim time [d], (dt) time integral [min], (out_dt) output time integral [min],"
+            header_string += "(N) number particles, (sres) sample resolution, (gres) (projected) grid resolution,"
+            header_string += "(interp) interpolation function, (smode) sample mode"
+            header_string += "\n"
+            value_string += "{:5.5f}, {:7.7f}, {:7.7f},".format(time_in_days, dt_minutes, outdt_minutes)
+            value_string += "{}, {}, {},".format(len(pset), sres, gres)
+            value_string += "{}, {}".format(interp_mode, sample_mode)
+            f.write(header_string)
+            f.write(value_string)
+
+
+        output_file = None
+        if writeout:
+            output_file = pset.ParticleFile(name=os.path.join(odir,out_fname+".nc"), outputdt=delta(minutes=outdt_minutes))
+
+        delete_func = RenewParticle
+        if deleteBC:
+            delete_func=DeleteParticle
+        postProcessFuncs = []
+
+        if MPI:
+            mpi_comm = MPI.COMM_WORLD
+            mpi_rank = mpi_comm.Get_rank()
+            if mpi_rank==0:
+                starttime = ostime.process_time()
+        else:
             starttime = ostime.process_time()
-    else:
-        starttime = ostime.process_time()
 
-    kernelfunc = AdvectionEE
-    if interp_mode == 'rk4':
-        kernelfunc = AdvectionRK4
-    elif interp_mode == 'rk45':
-        kernelfunc = AdvectionRK45
-    elif interp_mode == 'em':
-        kernelfunc = AdvectionDiffusionEM
-    elif interp_mode == 'm1':
-        kernelfunc = AdvectionDiffusionM1
+        kernelfunc = AdvectionEE
+        if interp_mode == 'rk4':
+            kernelfunc = AdvectionRK4
+        elif interp_mode == 'rk45':
+            kernelfunc = AdvectionRK45
+        elif interp_mode == 'em':
+            kernelfunc = AdvectionDiffusionEM
+        elif interp_mode == 'm1':
+            kernelfunc = AdvectionDiffusionM1
 
-    kernels = pset.Kernel(kernelfunc,delete_cfiles=True)
-    # if agingParticles:
-    if True:
-        kernels += pset.Kernel(initialize, delete_cfiles=True)
-        kernels += pset.Kernel(Age, delete_cfiles=True)
-    kernels += pset.Kernel(periodicBC, delete_cfiles=True)  # insert here to correct for boundary conditions right after advection)
+        kernels = pset.Kernel(kernelfunc,delete_cfiles=True)
+        # if agingParticles:
+        if True:
+            kernels += pset.Kernel(initialize, delete_cfiles=True)
+            kernels += pset.Kernel(Age, delete_cfiles=True)
+        kernels += pset.Kernel(periodicBC, delete_cfiles=True)  # insert here to correct for boundary conditions right after advection)
 
-    postProcessFuncs.append(perIterGC)
-    if backwardSimulation:
-        # ==== backward simulation ==== #
-        if animate_result:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
+        postProcessFuncs.append(perIterGC)
+        if backwardSimulation:
+            # ==== backward simulation ==== #
+            if animate_result:
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
+            else:
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
         else:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
-    else:
-        # ==== forward simulation ==== #
-        if animate_result:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
-        else:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
+            # ==== forward simulation ==== #
+            if animate_result:
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
+            else:
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
 
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        mpi_rank = mpi_comm.Get_rank()
-        if mpi_rank==0:
+        if MPI:
+            mpi_comm = MPI.COMM_WORLD
+            mpi_rank = mpi_comm.Get_rank()
+            if mpi_rank==0:
+                endtime = ostime.process_time()
+        else:
             endtime = ostime.process_time()
-    else:
-        endtime = ostime.process_time()
 
-    if writeout:
-        output_file.close()
+        if writeout:
+            output_file.close()
 
-    del kernels
-    del output_file
-    del pset
-    del fieldset
+        del kernels
+        del output_file
+        del pset
+        del fieldset
 
     # ================================================================================================================ #
     #          P O S T - P R O C E S S I N G
@@ -936,19 +1020,23 @@ if __name__=='__main__':
     data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
     N = data_xarray['lon'].data.shape[0]
     tN = data_xarray['lon'].data.shape[1]
-    print("N: {}, t_N: {}".format(N, tN))
+    if DBG_MSG:
+        print("N: {}, t_N: {}".format(N, tN))
     np.set_printoptions(linewidth=160)
     ns_per_sec = np.timedelta64(1, 's')  # nanoseconds in an sec
-    print("ns_per_sec = {}".format((ns_per_sec/np.timedelta64(1, 'ns')).astype(np.float64)))
+    if DBG_MSG:
+        print("ns_per_sec = {}".format((ns_per_sec/np.timedelta64(1, 'ns')).astype(np.float64)))
     sec_per_day = 86400.0
     ctime_array = data_xarray['time'].data
-    print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0 ,0]), ctime_array[0].min(), ctime_array[0].max()))
+    if DBG_MSG:
+        print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0 ,0]), ctime_array[0].min(), ctime_array[0].max()))
     timebase = ctime_array[:, 0]
     # time_in_min = np.nanmin(ctime_array, axis=0)
     # time_in_max = np.nanmax(ctime_array, axis=0)
     # timebase = time_in_max[0]
     dtime_array = np.transpose(ctime_array.transpose() - timebase)
-    print("time info from file after baselining: shape = {} type = {} range = ({}, {})".format(dtime_array.shape, type(dtime_array[0 ,0]), dtime_array[0].min(), dtime_array[0].max()))
+    if DBG_MSG:
+        print("time info from file after baselining: shape = {} type = {} range = ({}, {})".format(dtime_array.shape, type(dtime_array[0 ,0]), dtime_array[0].min(), dtime_array[0].max()))
     # print(dtime_array.dtype)
     # print(ns_per_sec.dtype)
     # pX = data_xarray['lon'].data[indices, :]  # only plot the first 32 particles
@@ -957,10 +1045,13 @@ if __name__=='__main__':
     fX = data_xarray['lon'].data  # to be loaded from pfile
     fY = data_xarray['lat'].data  # to be loaded from pfile
     fZ = None
+    sample3D = False
     if 'depth' in data_xarray.keys():
         fZ = data_xarray['depth'].data  # to be loaded from pfile
+        sample3D = True
     elif 'z' in data_xarray.keys():
         fZ = data_xarray['z'].data  # to be loaded from pfile
+        sample3D = True
     fT = dtime_array
     fT = convert_timearray(fT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fT")
     fA = data_xarray['age'].data  # to be loaded from pfile | age
@@ -972,63 +1063,139 @@ if __name__=='__main__':
     fA = convert_timearray(fA, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fA")
 
     # pcounts = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.int32)
-    pcounts = np.zeros((ysteps, xsteps), dtype=np.int32)
+    pcounts = None
+    if sample3D:
+        pcounts = np.zeros((zsteps, ysteps, xsteps), dtype=np.int32)
+    else:
+        pcounts = np.zeros((ysteps, xsteps), dtype=np.int32)
     pcounts_minmax = [0., 0.]
     pcounts_statistics = [0., 0.]
     pcounts_file = h5py.File(os.path.join(odir, "particlecount.h5"), "w")
-    pcounts_file_ds = pcounts_file.create_dataset("pcount", shape=(1, pcounts.shape[0], pcounts.shape[1]), dtype=pcounts.dtype, maxshape=(fT.shape[1], pcounts.shape[0], pcounts.shape[1]), compression="gzip", compression_opts=4)
+    pcounts_file_ds = None
+    if sample3D:
+        pcounts_file_ds = pcounts_file.create_dataset("pcount",
+                                                      shape=(1, pcounts.shape[0], pcounts.shape[1], pcounts.shape[2]),
+                                                      dtype=pcounts.dtype,
+                                                      maxshape=(fT.shape[1], pcounts.shape[0], pcounts.shape[1], pcounts.shape[2]),
+                                                      compression="gzip", compression_opts=4)
+    else:
+        pcounts_file_ds = pcounts_file.create_dataset("pcount", shape=(1, pcounts.shape[0], pcounts.shape[1]), dtype=pcounts.dtype, maxshape=(fT.shape[1], pcounts.shape[0], pcounts.shape[1]), compression="gzip", compression_opts=4)
     pcounts_file_ds.attrs['unit'] = "count (scalar)"
     pcounts_file_ds.attrs['name'] = 'particle_count'
 
     # density = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.float32)
-    density = np.zeros((ysteps, xsteps), dtype=np.float32)
+    density = None
+    if sample3D:
+        density = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+    else:
+        density = np.zeros((ysteps, xsteps), dtype=np.float32)
     density_minmax = [0., 0.]
     density_statistics = [0., 0.]
     density_file = h5py.File(os.path.join(odir, "density.h5"), "w")
-    density_file_ds = density_file.create_dataset("density", shape=(1, density.shape[0], density.shape[1]), dtype=density.dtype, maxshape=(fT.shape[1], density.shape[0], density.shape[1]), compression="gzip", compression_opts=4)
+    density_file_ds = None
+    if sample3D:
+        density_file_ds = density_file.create_dataset("density",
+                                                      shape=(1, density.shape[0], density.shape[1], density.shape[2]),
+                                                      dtype=density.dtype,
+                                                      maxshape=(fT.shape[1], density.shape[0], density.shape[1], density.shape[2]),
+                                                      compression="gzip", compression_opts=4)
+    else:
+        density_file_ds = density_file.create_dataset("density", shape=(1, density.shape[0], density.shape[1]), dtype=density.dtype, maxshape=(fT.shape[1], density.shape[0], density.shape[1]), compression="gzip", compression_opts=4)
     density_file_ds.attrs['unit'] = "pts / arc_deg^2"
     density_file_ds.attrs['name'] = 'density'
 
     # rel_density = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.float32)
-    rel_density = np.zeros((ysteps, xsteps), dtype=np.float32)
+    rel_density = None
+    if sample3D:
+        rel_density = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+    else:
+        rel_density = np.zeros((ysteps, xsteps), dtype=np.float32)
     rel_density_minmax = [0., 0.]
     rel_density_statistics = [0., 0.]
     rel_density_file = h5py.File(os.path.join(odir, "rel_density.h5"), "w")
-    rel_density_file_ds = rel_density_file.create_dataset("rel_density", shape=(1, rel_density.shape[0], rel_density.shape[1]), dtype=rel_density.dtype, maxshape=(fT.shape[1], rel_density.shape[0], rel_density.shape[1]), compression="gzip", compression_opts=4)
+    rel_density_file_ds = None
+    if sample3D:
+        rel_density_file_ds = rel_density_file.create_dataset("rel_density",
+                                                              shape=(1, rel_density.shape[0], rel_density.shape[1], rel_density.shape[2]),
+                                                              dtype=rel_density.dtype,
+                                                              maxshape=(fT.shape[1], rel_density.shape[0], rel_density.shape[1], rel_density.shape[2]),
+                                                              compression="gzip", compression_opts=4)
+    else:
+        rel_density_file_ds = rel_density_file.create_dataset("rel_density", shape=(1, rel_density.shape[0], rel_density.shape[1]), dtype=rel_density.dtype, maxshape=(fT.shape[1], rel_density.shape[0], rel_density.shape[1]), compression="gzip", compression_opts=4)
     rel_density_file_ds.attrs['unit'] = "pts_percentage / arc_deg^2"
     rel_density_file_ds.attrs['name'] = 'relative_density'
 
     # lifetime = np.zeros((fT.shape[1], xval.shape[0], yval.shape[0]), dtype=np.float32)
-    lifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
+    lifetime = None
+    if sample3D:
+        lifetime = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+    else:
+        lifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
     lifetime_minmax = [0., 0.]
     lifetime_statistics = [0., 0.]
     lifetime_file = h5py.File(os.path.join(odir, "lifetime.h5"), "w")
-    lifetime_file_ds = lifetime_file.create_dataset("lifetime", shape=(1, lifetime.shape[0], lifetime.shape[1]), dtype=lifetime.dtype, maxshape=(fT.shape[1], lifetime.shape[0], lifetime.shape[1]), compression="gzip", compression_opts=4)
+    lifetime_file_ds = None
+    if sample3D:
+        lifetime_file_ds = lifetime_file.create_dataset("lifetime",
+                                                        shape=(1, lifetime.shape[0], lifetime.shape[1], lifetime.shape[2]),
+                                                        dtype=lifetime.dtype,
+                                                        maxshape=(fT.shape[1], lifetime.shape[0], lifetime.shape[1], lifetime.shape[2]),
+                                                        compression="gzip", compression_opts=4)
+    else:
+        lifetime_file_ds = lifetime_file.create_dataset("lifetime", shape=(1, lifetime.shape[0], lifetime.shape[1]), dtype=lifetime.dtype, maxshape=(fT.shape[1], lifetime.shape[0], lifetime.shape[1]), compression="gzip", compression_opts=4)
     lifetime_file_ds.attrs['unit'] = "avg. lifetime"
     lifetime_file_ds.attrs['name'] = 'lifetime'
 
     A = float(gres**2)
     total_items = fT.shape[0] * fT.shape[1]
     for ti in range(fT.shape[1]):
-        pcounts[:, :] = 0
-        density[:, :] = 0
-        rel_density[:, :] = 0
-        lifetime[:, :] = 0
-        tlifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
+        if sample3D:
+            pcounts[:, :, :] = 0
+            density[:, :, :] = 0
+            rel_density[:, :, :] = 0
+            lifetime[:, :, :] = 0
+            tlifetime = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+        else:
+            pcounts[:, :] = 0
+            density[:, :] = 0
+            rel_density[:, :] = 0
+            lifetime[:, :] = 0
+            tlifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
 
         x_in = np.array(fX[:, ti])
         nonnan_x = ~np.isnan(x_in)
         y_in = np.array(fY[:, ti])
         nonnan_y = ~np.isnan(y_in)
-        x_in = x_in[np.logical_and(nonnan_x, nonnan_y)]
-        y_in = y_in[np.logical_and(nonnan_x, nonnan_y)]
-        xpts = np.floor((x_in+(a/2.0))*gres).astype(np.int32).flatten()
-        ypts = np.floor((y_in+(b/2.0))*gres).astype(np.int32).flatten()
-        assert xpts.shape[0] == ypts.shape[0], "Dimensions of xpts (={}) does not match ypts(={}).".format(xpts.shape[0], ypts.shape[0])
-        xcondition = np.logical_and((xpts >= 0), (xpts < (xsteps - 1)))
-        ycondition = np.logical_and((ypts >= 0), (ypts < (ysteps - 1)))
-        xpts = xpts[np.logical_and(xcondition, ycondition)]
-        ypts = ypts[np.logical_and(xcondition, ycondition)]
+        z_in, nonnan_z = (None, None)
+        if sample3D:
+            z_in = np.array(fZ[:, ti])
+            nonnan_z = ~np.isnan(z_in)
+        xpts, ypts, zpts = (None, None, None)
+        if sample3D:
+            x_in = x_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
+            y_in = y_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
+            z_in = z_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
+            xpts = (np.floor(x_in+(a/2.0))*gres).astype(np.int32).flatten()
+            ypts = (np.floor(y_in+(b/2.0))*gres).astype(np.int32).flatten()
+            zpts = (np.floor(z_in / gres)).astype(np.int32).flatten()
+            assert xpts.shape[0] == ypts.shape[0], "Dimensions of xpts (={}) does not match ypts(={}).".format(xpts.shape[0], ypts.shape[0])
+            assert xpts.shape[0] == zpts.shape[0], "Dimensions of xpts (={}) does not match zpts(={}).".format(xpts.shape[0], zpts.shape[0])
+            xcondition = np.logical_and((xpts >= 0), (xpts < (xsteps - 1)))
+            ycondition = np.logical_and((ypts >= 0), (ypts < (ysteps - 1)))
+            zcondition = np.logical_and((zpts >= 0), (zpts < (zsteps - 1)))
+            xpts = xpts[np.logical_and(np.logical_and(xcondition, ycondition), zcondition)]
+            ypts = ypts[np.logical_and(np.logical_and(xcondition, ycondition), zcondition)]
+            zpts = zpts[np.logical_and(np.logical_and(xcondition, ycondition), zcondition)]
+        else:
+            x_in = x_in[np.logical_and(nonnan_x, nonnan_y)]
+            y_in = y_in[np.logical_and(nonnan_x, nonnan_y)]
+            xpts = (np.floor(x_in+(a/2.0))*gres).astype(np.int32).flatten()
+            ypts = (np.floor(y_in+(b/2.0))*gres).astype(np.int32).flatten()
+            assert xpts.shape[0] == ypts.shape[0], "Dimensions of xpts (={}) does not match ypts(={}).".format(xpts.shape[0], ypts.shape[0])
+            xcondition = np.logical_and((xpts >= 0), (xpts < (xsteps - 1)))
+            ycondition = np.logical_and((ypts >= 0), (ypts < (ysteps - 1)))
+            xpts = xpts[np.logical_and(xcondition, ycondition)]
+            ypts = ypts[np.logical_and(xcondition, ycondition)]
 
         # xpts = np.floor((fX[:, ti]+(a/2.0))*gres).astype(np.int32).flatten()
         # xpts = np.maximum(np.minimum(xpts, xsteps - 1), 0)
@@ -1037,13 +1204,23 @@ if __name__=='__main__':
         if ti == 0:
             print("xpts: {}".format(xpts))
             print("ypts: {}".format(ypts))
+            if sample3D:
+                print("zpts: {}".format(zpts))
         for pi in range(xpts.shape[0]):
             try:
-                pcounts[ypts[pi], xpts[pi]] += 1
-                tlifetime[ypts[pi], xpts[pi]] += fA[pi, ti]
+                if sample3D:
+                    pcounts[zpts[pi], ypts[pi], xpts[pi]] += 1
+                    tlifetime[zpts[pi], ypts[pi], xpts[pi]] += fA[pi, ti]
+                else:
+                    pcounts[ypts[pi], xpts[pi]] += 1
+                    tlifetime[ypts[pi], xpts[pi]] += fA[pi, ti]
             except (IndexError, ) as error_msg:
                 # we don't abort here cause the brownian-motion wiggle of AvectionRK4EulerMarujama always edges on machine precision, which can np.floor(..) make go over-size
-                print("\nError trying to index point ({}, {}) with indices ({}, {})".format(fX[pi, ti], fY[pi, ti], xpts[pi], ypts[pi]))
+                if sample3D:
+                    print("\nError trying to index point ({}, {}, {}) with indices ({}, {}, {})".format(fX[pi, ti], fY[pi, ti], fZ[pi, ti],
+                                                                                                xpts[pi], ypts[pi], zpts[pi]))
+                else:
+                    print("\nError trying to index point ({}, {}) with indices ({}, {})".format(fX[pi, ti], fY[pi, ti], xpts[pi], ypts[pi]))
             if (pi % 100) == 0:
                 current_item = (ti*fT.shape[0]) + pi
                 workdone = current_item / total_items
@@ -1058,25 +1235,37 @@ if __name__=='__main__':
         pcounts_statistics[0] += pcounts.mean()
         pcounts_statistics[1] += pcounts.std()
         pcounts_file_ds.resize((ti+1), axis=0)
-        pcounts_file_ds[ti, :, :] = pcounts
+        if sample3D:
+            pcounts_file_ds[ti, :, :, :] = pcounts
+        else:
+            pcounts_file_ds[ti, :, :] = pcounts
 
         density_minmax = [min(density_minmax[0], density.min()), max(density_minmax[1], density.max())]
         density_statistics[0] += density.mean()
         density_statistics[1] += density.std()
         density_file_ds.resize((ti+1), axis=0)
-        density_file_ds[ti, :, :] = density
+        if sample3D:
+            density_file_ds[ti, :, :, :] = density
+        else:
+            density_file_ds[ti, :, :] = density
 
         rel_density_minmax = [min(rel_density_minmax[0], rel_density.min()), max(rel_density_minmax[1], rel_density.max())]
         rel_density_statistics[0] += rel_density.mean()
         rel_density_statistics[1] += rel_density.std()
         rel_density_file_ds.resize((ti+1), axis=0)
-        rel_density_file_ds[ti, :, :] = rel_density
+        if sample3D:
+            rel_density_file_ds[ti, :, :, :] = rel_density
+        else:
+            rel_density_file_ds[ti, :, :] = rel_density
 
         lifetime_minmax = [min(lifetime_minmax[0], lifetime.min()), max(lifetime_minmax[1], lifetime.max())]
         lifetime_statistics[0] += lifetime.mean()
         lifetime_statistics[1] += lifetime.std()
         lifetime_file_ds.resize((ti+1), axis=0)
-        lifetime_file_ds[ti, :, :] = lifetime
+        if sample3D:
+            lifetime_file_ds[ti, :, :, :] = lifetime
+        else:
+            lifetime_file_ds[ti, :, :] = lifetime
 
         del tlifetime
         del xpts
@@ -1163,7 +1352,8 @@ if __name__=='__main__':
     del pcounts
     del fX
     del fY
-    del fZ
+    if fZ is not None:
+        del fZ
     del fA
 
     # xval = np.arange(start=-a*0.5, stop=a*0.5, step=step, dtype=np.float32)[0:-1]
@@ -1209,13 +1399,23 @@ if __name__=='__main__':
 
     xval = np.arange(start=-a*0.5, stop=a*0.5, step=step, dtype=np.float32)
     yval = np.arange(start=-b*0.5, stop=b*0.5, step=step, dtype=np.float32)
-    zval = np.arange(start=0.0, stop=c, step=zstep, dtype=np.float32)
+    zval = None
+    if sample3D:
+        zval = np.arange(start=0.0, stop=c, step=zstep, dtype=np.float32)
     centers_x = xval + step/2.0
     centers_y = yval + step/2.0
-    centers_z = zval + zstep/2.0
-    us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
-    vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
-    ws = np.zeros((centers_y.shape[0], centers_x.shape[0], centers_z.shape[0]))
+    centers_z = None
+    if sample3D:
+        centers_z = zval + zstep/2.0
+    us, vs, ws = (None, None, None)
+    if sample3D:
+        us = np.zeros((centers_z.shape[0], centers_y.shape[0], centers_x.shape[0]))
+        vs = np.zeros((centers_z.shape[0], centers_y.shape[0], centers_x.shape[0]))
+        if use_W:
+            ws = np.zeros((centers_z.shape[0], centers_y.shape[0], centers_x.shape[0]))
+    else:
+        us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+        vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
 
     grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
     grid_lon_ds = grid_file.create_dataset("longitude", data=centers_x, compression="gzip", compression_opts=4)
@@ -1228,11 +1428,13 @@ if __name__=='__main__':
     grid_lat_ds.attrs['name'] = 'latitude'
     grid_lat_ds.attrs['min'] = centers_y.min()
     grid_lat_ds.attrs['max'] = centers_y.max()
-    grid_dep_ds = grid_file.create_dataset("depth", data=centers_z, compression="gzip", compression_opts=4)
-    grid_dep_ds.attrs['unit'] = "metres"
-    grid_dep_ds.attrs['name'] = 'depth'
-    grid_dep_ds.attrs['min'] = centers_z.min()
-    grid_dep_ds.attrs['max'] = centers_z.max()
+    grid_dep_ds = None
+    if sample3D:
+        grid_dep_ds = grid_file.create_dataset("depth", data=centers_z, compression="gzip", compression_opts=4)
+        grid_dep_ds.attrs['unit'] = "metres"
+        grid_dep_ds.attrs['name'] = 'depth'
+        grid_dep_ds.attrs['min'] = centers_z.min()
+        grid_dep_ds.attrs['max'] = centers_z.max()
     grid_time_ds = grid_file.create_dataset("times", data=fT[0], compression="gzip", compression_opts=4)
     grid_time_ds.attrs['unit'] = "seconds"
     grid_time_ds.attrs['name'] = 'time'
@@ -1243,23 +1445,67 @@ if __name__=='__main__':
     us_minmax = [0., 0.]
     us_statistics = [0., 0.]
     us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
-    us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(fT.shape[1], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
+    if sample3D:
+        us_file_ds = us_file.create_dataset("uo",
+                                            shape=(1, us.shape[0], us.shape[1], us.shape[2]), dtype=us.dtype,
+                                            maxshape=(fT.shape[1], us.shape[0], us.shape[1], us.shape[2]),
+                                            compression="gzip",
+                                            compression_opts=4)
+    else:
+        us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(fT.shape[1], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
     us_file_ds.attrs['unit'] = "m/s"
     us_file_ds.attrs['name'] = 'meridional_velocity'
 
     vs_minmax = [0., 0.]
     vs_statistics = [0., 0.]
     vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
-    vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(fT.shape[1], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
+    if sample3D:
+        vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1], vs.shape[2]), dtype=vs.dtype,
+                                            maxshape=(fT.shape[1], vs.shape[0], vs.shape[1], vs.shape[2]),
+                                            compression="gzip",
+                                            compression_opts=4)
+    else:
+        vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(fT.shape[1], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
     vs_file_ds.attrs['unit'] = "m/s"
     vs_file_ds.attrs['name'] = 'zonal_velocity'
 
-    ws_minmax = [0., 0.]
-    ws_statistics = [0., 0.]
-    ws_file = h5py.File(os.path.join(odir, "hydrodynamic_W.h5"), "w")
-    ws_file_ds = ws_file.create_dataset("wo", shape=(1, ws.shape[0], ws.shape[1], ws.shape[2]), dtype=ws.dtype, maxshape=(fT.shape[1], ws.shape[0], ws.shape[1], ws.shape[2]), compression="gzip", compression_opts=4)
-    ws_file_ds.attrs['unit'] = "m/s"
-    ws_file_ds.attrs['name'] = 'vertical_velocity'
+    ws_minmax, ws_statistics, ws_file, ws_file_ds = (None, None, None, None)
+    if sample3D and use_W:
+        ws_minmax = [0., 0.]
+        ws_statistics = [0., 0.]
+        ws_file = h5py.File(os.path.join(odir, "hydrodynamic_W.h5"), "w")
+        ws_file_ds = ws_file.create_dataset("wo", shape=(1, ws.shape[0], ws.shape[1], ws.shape[2]), dtype=ws.dtype, maxshape=(fT.shape[1], ws.shape[0], ws.shape[1], ws.shape[2]), compression="gzip", compression_opts=4)
+        ws_file_ds.attrs['unit'] = "m/s"
+        ws_file_ds.attrs['name'] = 'vertical_velocity'
+
+    print("Preparing field datatypes ...")
+    if not ( isinstance(U, da.core.Array) or isinstance(U, np.ndarray) ):
+        del U
+        del V
+        if W is not None:
+            del W
+        Upath = field_fpath + "U.nc"
+        Ufile = xr.open_dataset(Upath, decode_cf=True, engine='netcdf4', chunks='auto')
+        U = Ufile['vozocrtx'].data
+        if DBG_MSG:
+            print("U - shape: {}".format(U.shape))
+        Vpath = field_fpath + "V.nc"
+        Vfile = xr.open_dataset(Vpath, decode_cf=True, engine='netcdf4', chunks='auto')
+        V = Vfile['vomecrty'].data
+        if DBG_MSG:
+            print("V - shape: {}".format(V.shape))
+        if use_W:
+            Wpath = field_fpath + "W.nc"
+            Wfile = xr.open_dataset(Wpath, decode_cf=True, engine='netcdf4', chunks='auto')
+            W = Wfile['W'].data
+            if DBG_MSG:
+                print("W - shape: {}".format(W.shape))
+    if not isinstance(fdepths, np.ndarray):
+        fdepths = np.array(fdepths)
+    if not isinstance(flats, np.ndarray):
+        flats = np.array(flats)
+    if not isinstance(flons, np.ndarray):
+        flons = np.array(flons)
 
     print("Interpolating UVW on a regular-square grid ...")
     total_items = fT.shape[1]
@@ -1269,29 +1515,75 @@ if __name__=='__main__':
             uvw_ti = ti % U.shape[0]
         else:
             uvw_ti = min(ti, U.shape[0]-1)
-        us[:, :] = 0
-        vs[:, :] = 0
-        vs[:, :] = 0
-        mgrid = (flats, flons, fdepths)
-        p_center_z, p_center_y, p_center_x = np.meshgrid(centers_z, centers_y, centers_x, sparse=False, indexing='ij')
-        gcenters = (p_center_z.flatten(), p_center_y.flatten(), p_center_x.flatten())
-        # print("gcenters dims = ({}, {}, {})".format(gcenters[0].shape, gcenters[1].shape, gcenters[2].shape))
-        # print("mgrid dims = ({}, {}, {})".format(mgrid[0].shape, mgrid[1].shape, mgrid[2].shape))
-        # print("u dims = ({}, {}, {})".format(U.shape[0], U.shape[1], U.shape[2]))
-        # print("v dims = ({}, {}, {})".format(V.shape[0], V.shape[1], V.shape[2]))
-        us_local = interpn(mgrid, U[uvw_ti], gcenters, method='linear', fill_value=.0)
-        vs_local = interpn(mgrid, V[uvw_ti], gcenters, method='linear', fill_value=.0)
-        ws_local = interpn(mgrid, W[uvw_ti], gcenters, method='linear', fill_value=.0)
-        # print("us_local dims: {}".format(us_local.shape))
-        # print("vs_local dims: {}".format(vs_local.shape))
+        p_center_z = None
+        if sample3D:
+            fU = np.array(U[uvw_ti])
+            if DBG_MSG:
+                print("fU - shape: {}".format(fU.shape))
+            fV = np.array(V[uvw_ti])
+            if DBG_MSG:
+                print("fV - shape: {}".format(fV.shape))
+            fW = np.array(W[uvw_ti])
+            if DBG_MSG:
+                print("fW - shape: {}".format(fW.shape))
+            us[:, :, :] = 0
+            vs[:, :, :] = 0
+            if use_W:
+                ws[:, :, :] = 0
+            mgrid = (fdepths, flats, flons)
+            if DBG_MSG:
+                print("input meshgrid - shape: ({}, {}, {})".format(mgrid[0].shape[0], mgrid[1].shape[0], mgrid[2].shape[0]))
+            p_center_z, p_center_y, p_center_x = np.meshgrid(centers_z, centers_y, centers_x, sparse=False, indexing='ij', copy=False)
+            gcenters = (p_center_z.flatten(), p_center_y.flatten(), p_center_x.flatten())
+            if DBG_MSG:
+                print("interpolate points - shape: ({}, {}, {})".format(gcenters[0].shape[0], gcenters[1].shape[0], gcenters[2].shape[0]))
+            # print("gcenters dims = ({}, {}, {})".format(gcenters[0].shape, gcenters[1].shape, gcenters[2].shape))
+            # print("mgrid dims = ({}, {}, {})".format(mgrid[0].shape, mgrid[1].shape, mgrid[2].shape))
+            # print("u dims = ({}, {}, {})".format(U.shape[0], U.shape[1], U.shape[2]))
+            # print("v dims = ({}, {}, {})".format(V.shape[0], V.shape[1], V.shape[2]))
+            us_local = interpn(mgrid, fU, gcenters, method='linear', fill_value=.0)
+            vs_local = interpn(mgrid, fV, gcenters, method='linear', fill_value=.0)
+            ws_local = None
+            if use_W:
+                ws_local = interpn(mgrid, fW, gcenters, method='linear', fill_value=.0)
+            # print("us_local dims: {}".format(us_local.shape))
+            # print("vs_local dims: {}".format(vs_local.shape))
 
-        # us_local = np.reshape(us_local, p_center_y.shape)
-        # vs_local = np.reshape(vs_local, p_center_y.shape)
-        # print("us_local dims: {}".format(us_local.shape))
-        # print("vs_local dims: {}".format(vs_local.shape))
-        us[:, :] = np.reshape(us_local, p_center_x.shape)
-        vs[:, :] = np.reshape(vs_local, p_center_y.shape)
-        ws[:, :] = np.reshape(ws_local, p_center_z.shape)
+            # us_local = np.reshape(us_local, p_center_y.shape)
+            # vs_local = np.reshape(vs_local, p_center_y.shape)
+            # print("us_local dims: {}".format(us_local.shape))
+            # print("vs_local dims: {}".format(vs_local.shape))
+            us[:, :, :] = np.reshape(us_local, p_center_x.shape)
+            vs[:, :, :] = np.reshape(vs_local, p_center_y.shape)
+            if use_W:
+                ws[:, :, :] = np.reshape(ws_local, p_center_z.shape)
+            del fU
+            fU = None
+            del fV
+            fV = None
+            del fW
+            fW = None
+        else:
+            us[:, :] = 0
+            vs[:, :] = 0
+            mgrid = (flats, flons)
+            p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
+            gcenters = (p_center_y.flatten(), p_center_x.flatten())
+            # print("gcenters dims = ({}, {}, {})".format(gcenters[0].shape, gcenters[1].shape, gcenters[2].shape))
+            # print("mgrid dims = ({}, {}, {})".format(mgrid[0].shape, mgrid[1].shape, mgrid[2].shape))
+            # print("u dims = ({}, {}, {})".format(U.shape[0], U.shape[1], U.shape[2]))
+            # print("v dims = ({}, {}, {})".format(V.shape[0], V.shape[1], V.shape[2]))
+            us_local = interpn(mgrid, U[uvw_ti], gcenters, method='linear', fill_value=.0)
+            vs_local = interpn(mgrid, V[uvw_ti], gcenters, method='linear', fill_value=.0)
+            # print("us_local dims: {}".format(us_local.shape))
+            # print("vs_local dims: {}".format(vs_local.shape))
+
+            # us_local = np.reshape(us_local, p_center_y.shape)
+            # vs_local = np.reshape(vs_local, p_center_y.shape)
+            # print("us_local dims: {}".format(us_local.shape))
+            # print("vs_local dims: {}".format(vs_local.shape))
+            us[:, :] = np.reshape(us_local, p_center_x.shape)
+            vs[:, :] = np.reshape(vs_local, p_center_y.shape)
 
         us_minmax = [min(us_minmax[0], us.min()), max(us_minmax[1], us.max())]
         us_statistics[0] += us.mean()
@@ -1303,17 +1595,20 @@ if __name__=='__main__':
         vs_statistics[1] += vs.std()
         vs_file_ds.resize((ti+1), axis=0)
         vs_file_ds[ti, :, :] = vs
-        ws_minmax = [min(ws_minmax[0], ws.min()), max(ws_minmax[1], ws.max())]
-        ws_statistics[0] += ws.mean()
-        ws_statistics[1] += ws.std()
-        ws_file_ds.resize((ti+1), axis=0)
-        ws_file_ds[ti, :, :] = ws
+        if sample3D and use_W:
+            ws_minmax = [min(ws_minmax[0], ws.min()), max(ws_minmax[1], ws.max())]
+            ws_statistics[0] += ws.mean()
+            ws_statistics[1] += ws.std()
+            ws_file_ds.resize((ti+1), axis=0)
+            ws_file_ds[ti, :, :] = ws
 
         del us_local
         del vs_local
-        del ws_local
+        if sample3D and use_W:
+            del ws_local
         # del gcenters
-        del p_center_z
+        if sample3D:
+            del p_center_z
         del p_center_y
         del p_center_x
         # del mgrid
@@ -1332,19 +1627,22 @@ if __name__=='__main__':
     vs_file_ds.attrs['mean'] = vs_statistics[0] / float(fT.shape[1])
     vs_file_ds.attrs['std'] = vs_statistics[1] / float(fT.shape[1])
     vs_file.close()
-    ws_file_ds.attrs['min'] = ws_minmax[0]
-    ws_file_ds.attrs['max'] = ws_minmax[1]
-    ws_file_ds.attrs['mean'] = ws_statistics[0] / float(fT.shape[1])
-    ws_file_ds.attrs['std'] = ws_statistics[1] / float(fT.shape[1])
-    ws_file.close()
+    if sample3D and use_W:
+        ws_file_ds.attrs['min'] = ws_minmax[0]
+        ws_file_ds.attrs['max'] = ws_minmax[1]
+        ws_file_ds.attrs['mean'] = ws_statistics[0] / float(fT.shape[1])
+        ws_file_ds.attrs['std'] = ws_statistics[1] / float(fT.shape[1])
+        ws_file.close()
 
     # del gcenters
     del centers_x
     del centers_y
-    del centers_z
+    if sample3D:
+        del centers_z
     del xval
     del yval
-    del zval
+    if sample3D:
+        del zval
     # del xval_start
     # del yval_start
     del fT
