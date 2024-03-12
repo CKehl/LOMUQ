@@ -232,7 +232,7 @@ def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_o
     freqs = np.ones(times.size, dtype=np.float32)
     if not steady:
         for ti in range(times.shape[0]):
-            time_f = times[ti] # / gyre_rotation_speed
+            time_f = times[ti] / gyre_rotation_speed
             freqs[ti] *= omega * time_f
     else:
         freqs = (freqs * 0.5) * omega
