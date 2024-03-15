@@ -197,6 +197,7 @@ def doublgyre3D_func(ti, i, j, k):
     val_v = np.pi * var_Alpha * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (
             2 * var_epsilon * np.sin(freq) * x1 + 1 - 2 * var_epsilon * np.sin(freq))
     val_w = 0.2 * x3 * (1.0 - x3) * (x3 - var_epsilon * np.sin(4 * np.pi * freq) - 0.5)
+    val_w = val_w * -1.0
     return (ti, i, j, k, val_u, val_v, val_w)
 
 
@@ -251,10 +252,13 @@ def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_o
     #                 V[ti, k, j, i] = np.pi * A * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (2 * epsilon * np.sin(freq) * x1 + 1 - 2 * epsilon * np.sin(freq))
     #                 W[ti, k, j, i] = 0.2 * x3 * (1.0 - x3) * (x3 - epsilon * np.sin(4 * np.pi * freq) - 0.5)
 
-    items = zip(range(times.shape[0]), range(lon.shape[0]), range(lat.shape[0]), range(depth.shape[0]))
+    # items = zip(range(times.shape[0]), range(lon.shape[0]), range(lat.shape[0]), range(depth.shape[0]))
+    # coords_t, coords_x, coords_y, coords_z = np.meshgrid(times, lon, lat, depth, sparse=False, indexing='ij', copy=False)
+    idx_t, idx_x, idx_y, idx_z = np.meshgrid(range(times.shape[0]), range(lon.shape[0]), range(lat.shape[0]), range(depth.shape[0]), sparse=False, indexing='ij',copy=False)
+    items = zip(idx_t, idx_x, idx_y, idx_z)
     with Pool(initializer=worker_init, initargs=(lon, lat, depth, freqs, a, b, c, epsilon, A)) as pool:
         for result in pool.starmap(doublgyre3D_func, items):
-            (ti, k, j, i, val_u, val_v, val_w) = result
+            (ti, i, j, k, val_u, val_v, val_w) = result
             U[ti, k, j, i] = val_u
             V[ti, k, j, i] = val_v
             W[ti, k, j, i] = val_w
@@ -1015,12 +1019,12 @@ if __name__=='__main__':
     #          P O S T - P R O C E S S I N G
     # ================================================================================================================ #
     step = 1.0/gres
-    zstep = gres*10.0
+    zstep = gres*50.0
     xsteps = int(np.floor(a * gres))
     # xsteps = int(np.ceil(a * gres))
     ysteps = int(np.floor(b * gres))
     # ysteps = int(np.ceil(b * gres))
-    zsteps = int(np.floor(c * (1.0/(gres*10.0))))
+    zsteps = int(np.floor(c * (1.0/(gres*50.0))))
     # zsteps = int(np.ceil(c * gres))
 
     data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
