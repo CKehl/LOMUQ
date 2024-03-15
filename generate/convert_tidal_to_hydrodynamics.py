@@ -474,7 +474,7 @@ if __name__ == "__main__":
     nowtime = datetime.datetime.now()
     ParcelsRandom.seed(nowtime.microsecond)
 
-    branch = "tidal"
+    branch = "Tidal"
     computer_env = "local/unspecified"
     scenario = "resample"
     headdir = ""
