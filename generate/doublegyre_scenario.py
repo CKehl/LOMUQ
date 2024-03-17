@@ -59,9 +59,9 @@ tscale = 12.0*60.0*60.0 # in seconds
 # ==== yearly rotation - initial estimate ==== #
 # gyre_rotation_speed = 60.0*24.0*60.0*60.0  # assume 1 rotation every 8.5 weeks
 # ==== yearly rotation - 3D use ==== #
-gyre_rotation_speed = 30.5*24.0*60.0*60.0  # assume 1 rotation every 4.02 weeks
+# gyre_rotation_speed = 30.5*24.0*60.0*60.0  # assume 1 rotation every 4.02 weeks
 # ==== yearly rotation - 2D use ==== #
-# gyre_rotation_speed = 366.0*24.0*60.0*60.0  # assume 1 rotation every 52 weeks
+gyre_rotation_speed = 366.0*24.0*60.0*60.0  # assume 1 rotation every 52 weeks
 
 # ==== INFO FROM NEMO-MEDUSA: realistic values are 0-2.5 [m/s] ==== #
 # scalefac = (40.0 / (1000.0/ (60.0 * 60.0)))  # 40 km/h
@@ -197,7 +197,7 @@ def doublgyre3D_func(ti, i, j, k):
     val_v = np.pi * var_Alpha * np.cos(np.pi * f_xt) * np.sin(np.pi * x2) * (
             2 * var_epsilon * np.sin(freq) * x1 + 1 - 2 * var_epsilon * np.sin(freq))
     val_w = 0.2 * x3 * (1.0 - x3) * (x3 - var_epsilon * np.sin(4 * np.pi * freq) - 0.5)
-    val_w = val_w * -1.0
+    # val_w = val_w * -1.0
     return (ti, i, j, k, val_u, val_v, val_w)
 
 
@@ -233,7 +233,7 @@ def doublegyre_waves3D(xdim=960, ydim=480, zdim=20, periodic_wrap=False, write_o
     freqs = np.ones(times.size, dtype=np.float32)
     if not steady:
         for ti in range(times.shape[0]):
-            time_f = times[ti] / gyre_rotation_speed
+            time_f = times[ti]  # / gyre_rotation_speed
             freqs[ti] *= omega * time_f
     else:
         freqs = (freqs * 0.5) * omega
@@ -564,7 +564,8 @@ def UniformDiffusion(particle, fieldset, time):
     particle.lon += bx * dWx
     particle.lat += by * dWy
 
-def sample_regularly_jittered(lon_range, lat_range, res):
+
+def sample_regularly_jittered(lon_range, lat_range, depth_range=None, res=1.0):
     """
 
     :param lon_range:
@@ -574,19 +575,30 @@ def sample_regularly_jittered(lon_range, lat_range, res):
     """
     samples_lon = []
     samples_lat = []
-    jitter = np.random.random(2) * 1/res
+    samples_depth = None if depth_range is None else []
+    jitter = np.random.random(3) * 1/res
     lat_buckets = int(np.floor((lat_range[1]-lat_range[0])*res))-1
     lon_buckets = int(np.floor((lon_range[1]-lon_range[0])*res))-1
+    vertical_scale = 1.0/(res*75.0)
+    jitter[2] = np.random.random() * (vertical_scale/2.0)
+    depth_buckets = 0 if depth_range is None else int(np.floor((depth_range[1]-depth_range[0])*vertical_scale))-1
     for i in range(lat_buckets):
         for j in range(lon_buckets):
-            # sample = [jitter[0]+lon_range[0]+(j*(1/res))/(lon_range[1]-lon_range[0]), jitter[1]+lat_range[0]+(i*(1/res))/(lat_range[1]-lat_range[0])]
-            sample = [jitter[0] + lon_range[0] + (j * (1 / res)),
-                      jitter[1] + lat_range[0] + (i * (1 / res))]
-            samples_lon.append(sample[0])
-            samples_lat.append(sample[1])
+            for k in range(depth_buckets):
+                # sample = [jitter[0]+lon_range[0]+(j*(1/res))/(lon_range[1]-lon_range[0]), jitter[1]+lat_range[0]+(i*(1/res))/(lat_range[1]-lat_range[0])]
+                sample = [jitter[0] + lon_range[0] + (j * (1 / res)),
+                          jitter[1] + lat_range[0] + (i * (1 / res))]
+                if depth_range is not None:
+                    sample.append(jitter[2] + depth_range[0] + (k * (1 / vertical_scale)))
+                samples_lon.append(sample[0])
+                samples_lat.append(sample[1])
+                if depth_range is not None:
+                    samples_depth.append(sample[2])
+                del sample
     # samples_lon = np.unique(samples_lon)
     # samples_lat = np.unique(samples_lat)
-    return samples_lon, samples_lat
+    return samples_lon, samples_lat, samples_depth
+
 
 def rsample(low, high, size, sample_string):
     sample = None
@@ -608,7 +620,8 @@ def rsample(low, high, size, sample_string):
         sample = sample*(high-low) + low
     return sample
 
-def sample_irregularly(lon_range, lat_range, res=None, rsampler_str='uniform', nparticle=None):
+
+def sample_irregularly(lon_range, lat_range, depth_range=None, res=None, rsampler_str='uniform', nparticle=None):
     """
 
     :param lon_range:
@@ -619,33 +632,46 @@ def sample_irregularly(lon_range, lat_range, res=None, rsampler_str='uniform', n
     """
     samples_lon = []
     samples_lat = []
+    samples_depth = None if depth_range is None else []
     if res != None:
         llon = np.floor(lon_range[0])
         llat = np.floor(lat_range[0])
+        ldepth = 0. if depth_range is None else np.floor(depth_range[0])
         lat_buckets = int(np.floor((lat_range[1]-lat_range[0])))-1
         lon_buckets = int(np.floor((lon_range[1]-lon_range[0])))-1
+        depth_buckets = 0 if depth_range is None else int(np.floor((depth_range[1]-depth_range[0])))-1
         deg_scale = 1.0
-        local_nparticle = int(res**2)
+        vertical_scale = 1.0
+        local_nparticle = int(res**2) if depth_range in None else int(res**3)
         if res<1.0:
             deg_scale = int(np.round(1/res))
+            vertical_scale = int(np.round(res*75.0))
             local_nparticle = 1
         for i in range(lat_buckets):
             for j in range(lon_buckets):
-                local_samples = rsample([llon+(j*deg_scale), llat+(i*deg_scale)], [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale)], local_nparticle, rsampler_str)
-                samples_lon.append(local_samples[0,:])
-                samples_lat.append(local_samples[1,:])
+                for k in range(depth_buckets):
+                    lows = [llon+(j*deg_scale), llat+(i*deg_scale)] if depth_range is None else [llon+(j*deg_scale), llat+(i*deg_scale), ldepth+(k*vertical_scale)]
+                    highs = [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale)] if depth_range is None else [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale), ldepth+((k+1)*vertical_scale)]
+                    local_samples = rsample(lows, highs, local_nparticle, rsampler_str)
+                    samples_lon.append(local_samples[0,:])
+                    samples_lat.append(local_samples[1,:])
+                    if depth_range is not None:
+                        samples_depth.append(local_samples[2,:])
     else:
         assert type(nparticle) in (int, np.int32, np.uint32, np.int64, np.uint64)
         samples_lon = np.random.uniform(lon_range[0], lon_range[1], nparticle)
         samples_lat = np.random.uniform(lat_range[0], lat_range[1], nparticle)
-    return samples_lon, samples_lat
+        if depth_range is not None:
+            samples_depth = np.random.uniform(depth_range[0], depth_range[1], nparticle)
+    return samples_lon, samples_lat, samples_depth
 
-def sample_particles(lon_range, lat_range, res=None, rsampler_str='regular_jitter', nparticle=None):
+
+def sample_particles(lon_range, lat_range, depth_range=None, res=None, rsampler_str='regular_jitter', nparticle=None):
     if rsampler_str == 'regular_jitter':
         assert res is not None
-        return sample_regularly_jittered(lon_range, lat_range, res)
+        return sample_regularly_jittered(lon_range, lat_range, depth_range=depth_range, res=res)
     else:
-        return sample_irregularly(lon_range, lat_range, res, rsampler_str, nparticle)
+        return sample_irregularly(lon_range, lat_range, depth_range=depth_range, res=res, rsampler_str=rsampler_str, nparticle=nparticle)
 
 age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
 
@@ -653,6 +679,7 @@ age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
 # start example: python3 doublegyre_scenario.py -f NNvsGeostatistics/data/file.txt -t 30 -dt 720 -ot 1440 -im 'rk4' -N 2**12 -sres 2 -sm 'regular_jitter'
 #                python3 doublegyre_scenario.py -f NNvsGeostatistics/data/file.txt -t 366 -dt 720 -ot 2880 -im 'rk4' -N 2**12 -sres 2.5 -gres 5 -sm 'regular_jitter' -fsx 360 -fsy 180
 #                python3 doublegyre_scenario.py -f vis_example/metadata.txt -t 366 -dt 60 -ot 720 -im 'rk4' -N 2**12 -sres 2.5 -gres 5 -sm 'regular_jitter' -fsx 360 -fsy 180
+#                python3 doublegyre_scenario.py -f metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 1.25 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
 # ====
 if __name__=='__main__':
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
@@ -875,46 +902,92 @@ if __name__=='__main__':
             # ==== backward simulation ==== #
             if agingParticles:
                 if repeatdtFlag:
-                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                    pset.add(psetA)
+                    if use_3D:
+                        startlon, startlat, startdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, repeatdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, depth=startdepth, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, depth=repeatdepth, time=simStart)
+                        pset.add(psetA)
+                    else:
+                        startlon, startlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                        pset.add(psetA)
                 else:
-                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+                    if use_3D:
+                        lons, lats, depths = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, depth=depths, time=simStart)
+                    else:
+                        lons, lats, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
             else:
                 if repeatdtFlag:
-                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                    pset.add(psetA)
+                    if use_3D:
+                        startlon, startlat, startdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, repeatdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, depth=startdepth, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, depth=repeatdepth, time=simStart)
+                        pset.add(psetA)
+                    else:
+                        startlon, startlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                        pset.add(psetA)
                 else:
-                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+                    if use_3D:
+                        lons, lats, depths = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, depth=depths, time=simStart)
+                    else:
+                        lons, lats, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         else:
             # ==== forward simulation ==== #
             if agingParticles:
                 if repeatdtFlag:
-                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                    pset.add(psetA)
+                    if use_3D:
+                        startlon, startlat, startdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, repeatdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, depth=startdepth, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, depth=repeatdepth, time=simStart)
+                        pset.add(psetA)
+                    else:
+                        startlon, startlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                        pset.add(psetA)
                 else:
-                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+                    if use_3D:
+                        lons, lats, depths = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, depth=depths, time=simStart)
+                    else:
+                        lons, lats, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
             else:
                 if repeatdtFlag:
-                    startlon, startlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*start_scaler)), sample_mode, None)
-                    repeatlon, repeatlat = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), int(np.floor(sres*add_scaler)), sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
-                    pset.add(psetA)
+                    if use_3D:
+                        startlon, startlat, startdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat,repeatdepth = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, depth=startdepth, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, depth=repeatdepth, time=simStart)
+                        pset.add(psetA)
+                    else:
+                        startlon, startlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*start_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        repeatlon, repeatlat, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=int(np.floor(sres*add_scaler)), rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=startlon, lat=startlat, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
+                        psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=repeatlon, lat=repeatlat, time=simStart)
+                        pset.add(psetA)
                 else:
-                    lons, lats = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), sres, sample_mode, None)
-                    pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+                    if use_3D:
+                        print("sim-start: {}".format(simStart))
+                        lons, lats, depths = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), depth_range=(.0, c), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        print("array sizes - lons: {}, lats: {}, depths: {}".format(len(lons), len(lats), len(depths)))
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, depth=depths, time=simStart)
+                    else:
+                        lons, lats, _ = sample_particles((-a/2.0, a/2.0), (-b/2.0, b/2.0), res=sres, rsampler_str=sample_mode, nparticle=None)
+                        pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         print("Sampling concluded.")
 
         step = 1.0/gres
@@ -989,15 +1062,15 @@ if __name__=='__main__':
         if backwardSimulation:
             # ==== backward simulation ==== #
             if animate_result:
-                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(minutes=outdt_minutes), moviedt=delta(minutes=outdt_minutes), movie_background_field=fieldset.U)
             else:
-                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(minutes=outdt_minutes))
         else:
             # ==== forward simulation ==== #
             if animate_result:
-                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(minutes=outdt_minutes), moviedt=delta(minutes=outdt_minutes), movie_background_field=fieldset.U)
             else:
-                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
+                pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(minutes=outdt_minutes))
 
         if MPI:
             mpi_comm = MPI.COMM_WORLD
