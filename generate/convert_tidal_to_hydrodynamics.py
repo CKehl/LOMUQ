@@ -14,7 +14,7 @@ from numpy.random import default_rng
 from datetime import timedelta, datetime
 from argparse import ArgumentParser
 import math
-import datetime
+# import datetime
 import numpy as np
 import xarray as xr
 import fnmatch
@@ -33,7 +33,6 @@ except:
 with_GC = False
 DBG_MSG = False
 
-pset = None
 ptype = {'scipy': ScipyParticle, 'jit': JITParticle}
 method = {'RK4': AdvectionRK4, 'EE': AdvectionEE, 'RK45': AdvectionRK45}
 global_t_0 = 0
@@ -63,7 +62,7 @@ def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="
     ta = t_array
     while len(ta.shape) > 1:
         ta = ta[0]
-    if isinstance(ta[0], datetime.datetime) or isinstance(ta[0], datetime.timedelta) or isinstance(ta[0], np.timedelta64) or isinstance(ta[0], np.datetime64) or np.float64(ta[1]-ta[0]) > (dt_minutes+dt_minutes/2.0):
+    if isinstance(ta[0], datetime) or isinstance(ta[0], timedelta) or isinstance(ta[0], np.timedelta64) or isinstance(ta[0], np.datetime64) or np.float64(ta[1]-ta[0]) > (dt_minutes+dt_minutes/2.0):
         if debug:
             print("{}.dtype before conversion: {}".format(array_name, t_array.dtype))
         t_array = (t_array / ns_per_sec).astype(np.float64)
@@ -87,9 +86,30 @@ def create_fieldset(datahead, periodic_wrap):
     chs = 'auto'
     fieldset = None
     if periodic_wrap:
-        fieldset = FieldSet.from_netcdf(files, variables, dimensions, chunksize=chs, time_periodic=delta(days=31))
+        fieldset = FieldSet.from_netcdf(files, variables, dimensions, time_periodic=timedelta(days=31), mesh='spherical')
     else:
-        fieldset = FieldSet.from_netcdf(files, variables, dimensions, chunksize=chs, allow_time_extrapolation=True)
+        fieldset = FieldSet.from_netcdf(files, variables, dimensions, allow_time_extrapolation=True, mesh='spherical')
+    global tsteps
+    tsteps = len(fieldset.U.grid.time_full)
+    global tstepsize
+    tstepsize = int(math.floor(ttotal/tsteps))
+    return fieldset
+
+def create_SMOC_fieldset(datahead, periodic_wrap):
+    ddir = os.path.join(datahead, "SMOC/currents/")
+    files = sorted(glob(ddir+"SMOC_202201*.nc"))
+    print(files)
+    variables = {'U': 'uo', 'V': 'vo'}
+    dimensions = {'lon': 'longitude', 'lat': 'latitude', 'time': 'time'}
+    global ttotal
+    ttotal = 31  # days
+    # chs = False
+    chs = 'auto'
+    fieldset = None
+    if periodic_wrap:
+        fieldset = FieldSet.from_netcdf(files, variables, dimensions, chunksize=False, time_periodic=timedelta(days=31), mesh='spherical')
+    else:
+        fieldset = FieldSet.from_netcdf(files, variables, dimensions, chunksize=False, allow_time_extrapolation=True, mesh='spherical')
     global tsteps
     tsteps = len(fieldset.U.grid.time_full)
     global tstepsize
@@ -120,17 +140,22 @@ def create_fieldset_tidal_currents(datahead, name, filename):
     fieldset_tmp = FieldSet.from_netcdf(filenames, variables, dimensions, mesh='spherical')
     return fieldset_tmp
 
+
 class SampleParticle(JITParticle):
     valid = Variable('valid', dtype=np.int32, initial=-1, to_write=True)
     sample_u = Variable('sample_u', initial=0., dtype=np.float32, to_write=True)
     sample_v = Variable('sample_v', initial=0., dtype=np.float32, to_write=True)
-    U_tide = Variable('U_tide', dtype=np.float32, initial=0., to_write=False)
-    V_tide = Variable('V_tide', dtype=np.float32, initial=0., to_write=False)
+    U_tide = Variable('U_tide', dtype=np.float32, initial=0., to_write=True)
+    V_tide = Variable('V_tide', dtype=np.float32, initial=0., to_write=True)
+    pre_lon = Variable('pre_lon', dtype=np.float32, initial=0., to_write=False)
+    pre_lat = Variable('pre_lat', dtype=np.float32, initial=0., to_write=False)
+
 
 def DeleteParticle(particle, fieldset, time):
     if particle.valid < 0:
         particle.valid = 0
     particle.delete()
+
 
 def RenewParticle(particle, fieldset, time):
     xe = 3.6 * 1e2
@@ -150,19 +175,27 @@ def RenewParticle(particle, fieldset, time):
     #     particle.lat += b
         particle.lat = -ye / 2.0 + (math.fabs(particle.lat) - ye/2.0)
 
+
 periodicBC = RenewParticle
+
 
 def perIterGC():
     gc.collect()
 
+
 def sample_uv(particle, fieldset, time):
-    particle.sample_u = fieldset.U[time, particle.depth, particle.lat, particle.lon]
-    particle.sample_v = fieldset.V[time, particle.depth, particle.lat, particle.lon]
     if particle.valid < 0:
         if (math.isnan(particle.time) == True):
             particle.valid = 0
         else:
             particle.valid = 1
+    if particle.valid > 0:
+        (hu, hv) = fieldset.UV[time, particle.depth, particle.lat, particle.lon]
+        particle.sample_u = hu
+        particle.sample_v = hv
+        # particle.sample_u = fieldset.U[time, particle.depth, particle.lat, particle.lon]
+        # particle.sample_v = fieldset.V[time, particle.depth, particle.lat, particle.lon]
+
 
 def TidalMotionM2S2K1O1(particle, fieldset, time):
     """
@@ -183,9 +216,12 @@ def TidalMotionM2S2K1O1(particle, fieldset, time):
     deg2rad = math.pi / 180.0
 
     # Calculation of factors T, h, s at t0 (source: Doodson (1921))
-    T0 = math.fmod(cT0, 360.0) * deg2rad
-    h0 = math.fmod(ch0, 360.0) * deg2rad
-    s0 = math.fmod(cs0, 360.0) * deg2rad
+    # T0 = math.fmod(cT0, 360.0) * deg2rad
+    # h0 = math.fmod(ch0, 360.0) * deg2rad
+    # s0 = math.fmod(cs0, 360.0) * deg2rad
+    T0 = cT0 * deg2rad
+    h0 = ch0 * deg2rad
+    s0 = cs0 * deg2rad
 
     # Calculation of V(t0) (source: Schureman (1958))
     V_M2 = 2 * T0 + 2 * h0 - 2 * s0
@@ -430,15 +466,14 @@ def sample_particles(lon_range, lat_range, res=None, rsampler_str='regular_jitte
 if __name__ == "__main__":
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
     parser.add_argument("-f", "--filename", dest="filename", type=str, default="file.txt", help="(relative) (text) file path of the csv hyper parameters")
-    parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=1, help="runtime in days (default: 1)")
+    parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=366, help="runtime in days (default: 1)")
     parser.add_argument("-dt", "--deltatime", dest="dt", type=int, default=300, help="computational delta_t time stepping in minutes (default: 300sec = 5min = 0.05h)")
     parser.add_argument("-ot", "--outputtime", dest="outdt", type=int, default=1800, help="output time stepping in seconds (default: 1800sec = 30min = 0.5h)")
     parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1'], default="jit", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1)]")
     # parser.add_argument("-N", "--n_particles", dest="nparticles", type=str, default="2**6", help="number of particles to generate and advect (default: 2e6)")
     parser.add_argument("-gres", "--grid_resolution", dest="gres", type=str, default="10", help="number of cells per arc-degree or metre (default: 2). Fair range: 1 - 12")
-    parser.add_argument("-sm", "--samplemode", dest="sample_mode", choices=['regular_jitter','uniform','gaussian','triangular','vonmises'], default='regular_jitter', help="sampling distribution mode = [regular_jitter, (irregular) uniform, (irregular) gaussian, (irregular) triangular, (irregular) vonmises]")
-    parser.add_argument("-fsx", "--field_sx", dest="field_sx", type=int, default="480", help="number of original field cells in x-direction")
-    parser.add_argument("-fsy", "--field_sy", dest="field_sy", type=int, default="240", help="number of original field cells in y-direction")
+    # parser.add_argument("-fsx", "--field_sx", dest="field_sx", type=int, default="480", help="number of original field cells in x-direction")
+    # parser.add_argument("-fsy", "--field_sy", dest="field_sy", type=int, default="240", help="number of original field cells in y-direction")
     args = parser.parse_args()
 
     ParticleSet = BenchmarkParticleSet
@@ -446,8 +481,8 @@ if __name__ == "__main__":
     #     ParticleSet = DryParticleSet
 
     filename=args.filename
-    field_sx = args.field_sx
-    field_sy = args.field_sy
+    # field_sx = args.field_sx
+    # field_sy = args.field_sy
     deleteBC = True
     animate_result = False
     visualize_results = False
@@ -465,13 +500,12 @@ if __name__ == "__main__":
     # cycle_scaler = 7.0 / 4.0
     # start_N_particles = Nparticle
     gres = int(float(eval(args.gres)))
-    sample_mode = args.sample_mode
     interp_mode = args.interp_mode
     compute_mode = 'jit'  # args.compute_mode
 
     dt_seconds = args.dt
     outdt_seconds = args.outdt
-    nowtime = datetime.datetime.now()
+    nowtime = datetime.now()
     ParcelsRandom.seed(nowtime.microsecond)
 
     branch = "Tidal"
@@ -502,9 +536,11 @@ if __name__ == "__main__":
         CARTESIUS_SCRATCH_USERNAME = 'christian'
         headdir = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
         odir = headdir
-        datahead = "/media/{}/MyPassport/data/hydrodynamic".format(CARTESIUS_SCRATCH_USERNAME)
+        # datahead = "/media/{}/MyPassport/data/hydrodynamic".format(CARTESIUS_SCRATCH_USERNAME)  # CMEMS
+        datahead = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)  # CMEMS
         tidaldir = "/media/{}/DATA/data/Tidal/FES2014".format(CARTESIUS_SCRATCH_USERNAME)
-        dirread_top = os.path.join(datahead, 'CMEMS/GLOBAL_REANALYSIS_PHY_001_030/')
+        # dirread_top = os.path.join(datahead, 'CMEMS/GLOBAL_REANALYSIS_PHY_001_030/')
+        dirread_top = os.path.join(datahead, 'SMOC/currents')
         computer_env = "Prometheus"
     else:
         headdir = "/var/scratch/experiments"
@@ -543,7 +579,7 @@ if __name__ == "__main__":
     us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
     vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
     seconds_per_day = 24.0*60.0*60.0
-    num_t_samples = (time_in_days*seconds_per_day) / outdt_seconds
+    num_t_samples = int(np.floor((time_in_days*seconds_per_day) / outdt_seconds))
     global_fT = np.linspace(start=.0, stop=time_in_days*seconds_per_day, num=num_t_samples, endpoint=True, dtype=np.float64)
 
     grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
@@ -571,14 +607,14 @@ if __name__ == "__main__":
     us_minmax = [0., 0.]
     us_statistics = [0., 0.]
     us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
-    us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(global_fT.shape[1], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
+    us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(global_fT.shape[0], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
     us_file_ds.attrs['unit'] = "m/s"
     us_file_ds.attrs['name'] = 'meridional_velocity'
 
     vs_minmax = [0., 0.]
     vs_statistics = [0., 0.]
     vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
-    vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(global_fT.shape[1], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
+    vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(global_fT.shape[0], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
     vs_file_ds.attrs['unit'] = "m/s"
     vs_file_ds.attrs['name'] = 'zonal_velocity'
 
@@ -589,7 +625,7 @@ if __name__ == "__main__":
 
 
     # sample_func = sample_uv
-    fieldset = create_fieldset(datahead=datahead, periodic_wrap=True)
+    fieldset = create_SMOC_fieldset(datahead=datahead, periodic_wrap=True)
     t0 = datetime(1900, 1, 1, 0, 0)  # origin of time = 1 January 1900, 00:00:00 UTC
     fieldset.add_constant('t0rel', (day_start - t0).total_seconds())  # number of seconds elapsed between t0 and starttime
     deg2rad = math.pi / 180.0  # factor to convert degrees to radians
@@ -616,7 +652,7 @@ if __name__ == "__main__":
     fieldset.add_field(fieldset_s2.VaS2)
     fieldset.add_field(fieldset_s2.VgS2)
     fieldset_k1 = create_fieldset_tidal_currents(datahead=tidaldir, name='K1', filename='k1')
-    fieldset_k1.UaM2.set_scaling_factor(1e-2)
+    fieldset_k1.UaK1.set_scaling_factor(1e-2)
     fieldset_k1.UgK1.set_scaling_factor(deg2rad)  # convert from degrees to radians
     fieldset_k1.VaK1.set_scaling_factor(1e-2)  # cm/s to m/s
     fieldset_k1.VgK1.set_scaling_factor(deg2rad)
@@ -689,15 +725,16 @@ if __name__ == "__main__":
     out_fname = "tides"
     p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
     sample_pset = ParticleSet(fieldset=fieldset, pclass=SampleParticle, lon=np.array(p_center_x).flatten(), lat=np.array(p_center_y).flatten(), time=sample_time)
-    sample_kernel = sample_pset.Kernel(sample_uv)
-    sample_kernel += sample_pset.Kernel(TidalMotionM2S2K1O1)
+    sample_kernel = sample_pset.Kernel(sample_uv, delete_cfiles=True)
+    # sample_kernel += sample_pset.Kernel(TidalMotionM2S2K1O1, delete_cfiles=True)
+    # sample_kernel += sample_pset.Kernel(validate, delete_cfiles=True)
     sample_outname = out_fname + "_sampleuv"
     sample_output_file = sample_pset.ParticleFile(name=os.path.join(odir,sample_outname+".nc"), outputdt=timedelta(seconds=outdt_seconds))
     delete_func = RenewParticle
     # if deleteBC:
     #     delete_func=DeleteParticle
     postProcessFuncs = []
-    postProcessFuncs.append(perIterGC)
+    # postProcessFuncs.append(perIterGC)
     sample_pset.execute(sample_kernel, runtime=timedelta(days=time_in_days), dt=timedelta(seconds=dt_seconds), output_file=sample_output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=timedelta(seconds=outdt_seconds))
     sample_output_file.close()
     del sample_output_file
@@ -787,13 +824,13 @@ if __name__ == "__main__":
 
     us_file_ds.attrs['min'] = us_minmax[0]
     us_file_ds.attrs['max'] = us_minmax[1]
-    us_file_ds.attrs['mean'] = us_statistics[0] / float(fT.shape[1])
-    us_file_ds.attrs['std'] = us_statistics[1] / float(fT.shape[1])
+    us_file_ds.attrs['mean'] = us_statistics[0] / float(psX.shape[0])
+    us_file_ds.attrs['std'] = us_statistics[1] / float(psX.shape[0])
     us_file.close()
     vs_file_ds.attrs['min'] = vs_minmax[0]
     vs_file_ds.attrs['max'] = vs_minmax[1]
-    vs_file_ds.attrs['mean'] = vs_statistics[0] / float(fT.shape[1])
-    vs_file_ds.attrs['std'] = vs_statistics[1] / float(fT.shape[1])
+    vs_file_ds.attrs['mean'] = vs_statistics[0] / float(psX.shape[1])
+    vs_file_ds.attrs['std'] = vs_statistics[1] / float(psX.shape[1])
     vs_file.close()
 
     del centers_x
