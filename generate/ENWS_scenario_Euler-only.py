@@ -50,6 +50,41 @@ ttotal = 1.0
 # in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
 
 
+# -------------------------------------------------------------------------------------------------------------------- #
+
+def time_index_value(tx, _ft, _ft_dt=None):
+    # expect ft to be forward-linear
+    ft = _ft
+    if isinstance(_ft, xr.DataArray):
+        ft = ft.data
+    f_dt = _ft_dt
+    if f_dt is None:
+        f_dt = ft[1] - ft[0]
+        if type(f_dt) not in [np.float64, np.float32]:
+            f_dt = timedelta(f_dt).total_seconds()
+    # f_interp = (f_min + tx) / f_dt if f_dt >= 0 else (f_max + tx) / f_dt
+    f_interp = tx / f_dt
+    ti = int(math.floor(f_interp))
+    ti = max(0, min(ft.shape[0]-1, ti))
+    return ti
+
+
+def time_partion_value(tx, _ft, _ft_dt=None):
+    # expect ft to be forward-linear
+    ft = _ft
+    if isinstance(_ft, xr.DataArray):
+        ft = ft.data
+    f_dt = _ft_dt
+    if f_dt is None:
+        f_dt = ft[1] - ft[0]
+        if type(f_dt) not in [np.float64, np.float32]:
+            f_dt = timedelta(f_dt).total_seconds()
+    # f_interp = (f_min + tx) / f_dt if f_dt >= 0 else (f_max + tx) / f_dt
+    f_interp = abs(tx / f_dt)
+    f_interp = max(0.0, min(float(ft.shape[0]-1), f_interp))
+    f_t = f_interp - math.floor(f_interp)
+    return f_t
+
 # Helper function for time-conversion from the calendar format
 def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="time array"):
     """
@@ -397,12 +432,47 @@ if __name__=='__main__':
     global_psT = time_in_max_s -time_in_max_s[0]
     psT = convert_timearray(psT, outdt_seconds, ns_per_sec, debug=DBG_MSG, array_name="psT")
     global_psT = convert_timearray(global_psT, outdt_seconds, ns_per_sec, debug=DBG_MSG, array_name="global_psT")
-    print("|t_sample|: {}".format(global_psT.shape))
+    psT_dt = global_psT[1] - global_psT[0]
+    reverse_time = (np.all(global_psT <= np.finfo(global_psT.dtype).eps) or (np.max(psT[0]) - np.min(psT[0])) < 0) and (psT_dt < 0)
+    psT_ext = (global_psT.min(), global_psT.max())
+    print("|t_sample|: {}; dt = {}; [T] = {}".format(global_psT.shape, psT_dt, psT_ext))
     psU = sample_xarray['sample_u']  # to be loaded from pfile
     psV = sample_xarray['sample_v']  # to be loaded from pfile
     psUw = sample_xarray['sample_uw']  # to be loaded from pfile
     psVw = sample_xarray['sample_vw']  # to be loaded from pfile
     print("Sampled data loaded.")
+
+    # ==== time interpolation ==== #
+    ti_min = 0
+    ti_max = global_psT.shape[0]-1
+    pT_max = max(global_psT[ti_max], global_psT[ti_min])
+    pT_min = min(global_psT[ti_max], global_psT[ti_min])
+    interpolate_particles = True
+    idt = math.copysign(1.0 * 86400.0, psT_dt)
+    iT = global_psT
+    cap_min = global_psT[ti_min]
+    cap_max = global_psT[ti_max]
+    iT_max = np.max(global_psT)
+    iT_min = np.min(global_psT)
+    tsteps = int(math.floor((psT_ext[1]-psT_ext[0])/psT_dt))
+    if interpolate_particles:
+        # del us
+        # us = None
+        # del vs
+        # vs = None
+        tsteps = int(math.floor((pT_max-pT_min)/idt)) if not reverse_time else int(math.floor((pT_min-pT_max)/idt))
+        tsteps = abs(tsteps)
+        iT = np.linspace(pT_min, pT_max, tsteps, dtype=np.float64) if not reverse_time else np.linspace(pT_max, pT_min, tsteps, dtype=np.float64)
+        ti_min = max(np.min(np.nonzero(iT >= cap_min)[0])-1, 0) if not reverse_time else max(np.min(np.nonzero(iT <= cap_min)[0])-1, 0)
+        ti_max = min(np.max(np.nonzero(iT <= cap_max)[0])+1, iT.shape[0]-1) if not reverse_time else min(np.max(np.nonzero(iT >= cap_max)[0])+1, iT.shape[0]-1)
+        iT_max = np.max(iT)
+        iT_min = np.min(iT)
+        print("New time field: t_min = {}, t_max = {}, dt = {}, |T| = {}, ti_min_new = {}, ti_max_new = {}".format(iT_min, iT_max, idt, iT.shape[0], ti_min, ti_max))
+        # us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+        # vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+    # ==== end time interpolation ==== #
+
+
 
     grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
     grid_lon_ds = grid_file.create_dataset("longitude", data=centers_x, compression="gzip", compression_opts=4)
@@ -415,34 +485,95 @@ if __name__=='__main__':
     grid_lat_ds.attrs['name'] = 'latitude'
     grid_lat_ds.attrs['min'] = centers_y.min()
     grid_lat_ds.attrs['max'] = centers_y.max()
-    grid_time_ds = grid_file.create_dataset("times", data=global_psT, compression="gzip", compression_opts=4)
+    grid_time_ds = grid_file.create_dataset("times", data=iT, compression="gzip", compression_opts=4)
     grid_time_ds.attrs['unit'] = "seconds"
     grid_time_ds.attrs['name'] = 'time'
-    grid_time_ds.attrs['min'] = np.nanmin(global_psT)
-    grid_time_ds.attrs['max'] = np.nanmax(global_psT)
+    grid_time_ds.attrs['min'] = np.nanmin(iT)
+    grid_time_ds.attrs['max'] = np.nanmax(iT)
     grid_file.close()
 
     us_minmax = [0., 0.]
     us_statistics = [0., 0.]
-    us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
-    us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(global_psT.shape[0], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
-    us_file_ds.attrs['unit'] = "m/s"
-    us_file_ds.attrs['name'] = 'meridional_velocity'
+    us_file, us_file_ds = None, None
+    if not interpolate_particles:
+        us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
+        us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(iT.shape[0], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
+        us_file_ds.attrs['unit'] = "m/s"
+        us_file_ds.attrs['name'] = 'meridional_velocity'
 
     vs_minmax = [0., 0.]
     vs_statistics = [0., 0.]
-    vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
-    vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(global_psT.shape[0], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
-    vs_file_ds.attrs['unit'] = "m/s"
-    vs_file_ds.attrs['name'] = 'zonal_velocity'
+    vs_file, vs_file_ds = None, None
+    if not interpolate_particles:
+        vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
+        vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(iT.shape[0], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
+        vs_file_ds.attrs['unit'] = "m/s"
+        vs_file_ds.attrs['name'] = 'zonal_velocity'
 
     print("Interpolating UV on a regular-square grid ...")
     total_items = psT.shape[1]
-    for ti in range(psT.shape[1]):
-        us_local = np.expand_dims(psU[:, ti]+psUw[:, ti], axis=1)
-        us_local[~mask_array_s, :] = 0
-        vs_local = np.expand_dims(psV[:, ti]+psVw[:, ti], axis=1)
-        vs_local[~mask_array_s, :] = 0
+    for ti in range(ti_min, ti_max+1):  # range(psT.shape[1]):
+        if interpolate_particles:
+            # ==== ==== create files ==== ==== #
+            us_minmax = [0., 0.]
+            us_statistics = [0., 0.]
+            u_filename = "hydrodynamic_U_d%d.h5" % (ti, )
+            us_file = h5py.File(os.path.join(odir, u_filename), "w")
+            us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(1, us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
+            us_file_ds.attrs['unit'] = "m/s"
+            us_file_ds.attrs['name'] = 'meridional_velocity'
+
+            vs_minmax = [0., 0.]
+            vs_statistics = [0., 0.]
+            v_filename = "hydrodynamic_V_d%d.h5" %(ti, )
+            vs_file = h5py.File(os.path.join(odir, v_filename), "w")
+            vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(1, vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
+            vs_file_ds.attrs['unit'] = "m/s"
+            vs_file_ds.attrs['name'] = 'zonal_velocity'
+            # ==== === files created. === ==== #
+
+        if interpolate_particles:
+            tx0 = iT_min + float(ti) * idt if not reverse_time else iT_max + float(ti) * idt
+            # tx1 = iT_min + float((ti + 1) % iT.shape[0]) * idt if periodicFlag else iT_min + float(min(ti + 1, iT.shape[0]-1)) * idt
+            # tx1 = (iT_max + float((ti + 1) % iT.shape[0]) * idt if periodicFlag else iT_max + float(min(ti + 1, iT.shape[0] - 1)) * idt) if reverse_time else tx1
+            tx1 = iT_min + float(min(ti + 1, iT.shape[0]-1)) * idt
+            tx1 = (iT_max + float(min(ti + 1, iT.shape[0] - 1)) * idt) if reverse_time else tx1
+            if DBG_MSG:  #
+                print("tx0: {}, tx1: {}".format(tx0, tx1))
+            p_ti0 = time_index_value(tx0, global_psT)
+            p_tt = time_partion_value(tx0, global_psT)
+            p_ti1 = time_index_value(tx1, global_psT)
+            if DBG_MSG:  #
+                print("p_ti0: {}, p_ti1: {}, p_tt: {}".format(p_ti0, p_ti1, p_tt))
+            # psU_ti0 = np.array(psU[:, p_ti0])
+            # psU_ti1 = np.array(psU[:, p_ti1])
+            # psUw_ti0 = np.array(psUw[:, p_ti0])
+            # psUw_ti1 = np.array(psUw[:, p_ti1])
+            # psV_ti0 = np.array(psV[:, p_ti0])
+            # psV_ti1 = np.array(psV[:, p_ti1])
+            # psVw_ti0 = np.array(psVw[:, p_ti0])
+            # psVw_ti1 = np.array(psVw[:, p_ti1])
+            us_local = np.squeeze(np.array((1.0-p_tt) * (psU[:, p_ti0] + psUw[:, p_ti0]) + p_tt * (psU[:, p_ti1] + psUw[:, p_ti1])))
+            if DBG_MSG:
+                print("us_local (after creation): {}".format(us_local.shape))
+            us_local = np.expand_dims(us_local, axis=1)
+            if DBG_MSG:
+                print("us_local (after dim-extension): {}".format(us_local.shape))
+            # us_local = np.reshape(us_local, (N_s, 1))  # us_local[:, np.newaxis]  # np.expand_dims(us_local, axis=1)
+            # if DBG_MSG:
+            #     print("us_local (after reshape): {}".format(us_local.shape))
+            us_local[~mask_array_s, :] = 0
+            if DBG_MSG:
+                print("us_local (after trimming): {}".format(us_local.shape))
+            vs_local = np.squeeze(np.array((1.0-p_tt) * (psV[:, p_ti0] + psVw[:, p_ti0]) + p_tt * (psV[:, p_ti1] + psVw[:, p_ti1])))
+            vs_local = np.expand_dims(vs_local, axis=1)
+            # vs_local = np.reshape(vs_local, (N_s, 1))  # vs_local[:, np.newaxis]  # np.expand_dims(vs_local, axis=1)
+            vs_local[~mask_array_s, :] = 0
+        else:
+            us_local = np.expand_dims(psU[:, ti]+psUw[:, ti], axis=1)
+            us_local[~mask_array_s, :] = 0
+            vs_local = np.expand_dims(psV[:, ti]+psVw[:, ti], axis=1)
+            vs_local[~mask_array_s, :] = 0
         if ti == 0 and DBG_MSG:
             print("us.shape {}; us_local.shape: {}; psU.shape: {}; p_center_y.shape: {}".format(us.shape, us_local.shape, psU.shape, p_center_y.shape))
 
@@ -452,31 +583,50 @@ if __name__=='__main__':
         us_minmax = [min(us_minmax[0], us.min()), max(us_minmax[1], us.max())]
         us_statistics[0] += us.mean()
         us_statistics[1] += us.std()
-        us_file_ds.resize((ti+1), axis=0)
-        us_file_ds[ti, :, :] = us
         vs_minmax = [min(vs_minmax[0], vs.min()), max(vs_minmax[1], vs.max())]
         vs_statistics[0] += vs.mean()
         vs_statistics[1] += vs.std()
-        vs_file_ds.resize((ti+1), axis=0)
-        vs_file_ds[ti, :, :] = vs
+        if not interpolate_particles:
+            us_file_ds.resize((ti+1), axis=0)
+            us_file_ds[ti, :, :] = us
+            vs_file_ds.resize((ti+1), axis=0)
+            vs_file_ds[ti, :, :] = vs
+        else:
+            us_file_ds[0, :, :] = us
+            vs_file_ds[0, :, :] = vs
+
+        if interpolate_particles:
+            us_file_ds.attrs['min'] = us_minmax[0]
+            us_file_ds.attrs['max'] = us_minmax[1]
+            us_file_ds.attrs['mean'] = us_statistics[0]
+            us_file_ds.attrs['std'] = us_statistics[1]
+            us_file.close()
+            vs_file_ds.attrs['min'] = vs_minmax[0]
+            vs_file_ds.attrs['max'] = vs_minmax[1]
+            vs_file_ds.attrs['mean'] = vs_statistics[0]
+            vs_file_ds.attrs['std'] = vs_statistics[1]
+            vs_file.close()
 
         # del us_local
         # del vs_local
+        us_local = None
+        vs_local = None
         current_item = ti
         workdone = current_item / total_items
         print("\rProgress: [{0:50s}] {1:.1f}%".format('#' * int(workdone * 50), workdone * 100), end="", flush=True)
     print("\nFinished UV-interpolation.")
 
-    us_file_ds.attrs['min'] = us_minmax[0]
-    us_file_ds.attrs['max'] = us_minmax[1]
-    us_file_ds.attrs['mean'] = us_statistics[0] / float(global_psT.shape[0])
-    us_file_ds.attrs['std'] = us_statistics[1] / float(global_psT.shape[0])
-    us_file.close()
-    vs_file_ds.attrs['min'] = vs_minmax[0]
-    vs_file_ds.attrs['max'] = vs_minmax[1]
-    vs_file_ds.attrs['mean'] = vs_statistics[0] / float(global_psT.shape[0])
-    vs_file_ds.attrs['std'] = vs_statistics[1] / float(global_psT.shape[0])
-    vs_file.close()
+    if not interpolate_particles:
+        us_file_ds.attrs['min'] = us_minmax[0]
+        us_file_ds.attrs['max'] = us_minmax[1]
+        us_file_ds.attrs['mean'] = us_statistics[0] / float(iT.shape[0])
+        us_file_ds.attrs['std'] = us_statistics[1] / float(iT.shape[0])
+        us_file.close()
+        vs_file_ds.attrs['min'] = vs_minmax[0]
+        vs_file_ds.attrs['max'] = vs_minmax[1]
+        vs_file_ds.attrs['mean'] = vs_statistics[0] / float(iT.shape[0])
+        vs_file_ds.attrs['std'] = vs_statistics[1] / float(iT.shape[0])
+        vs_file.close()
 
     del centers_x
     del centers_y
