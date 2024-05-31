@@ -3,60 +3,57 @@ Author: Dr. Christian Kehl
 Date: 11-02-2020
 """
 
-from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, AdvectionRK4_3D  # noqa
-from parcels import FieldSet, ScipyParticle, JITParticle, Variable, StateCode, OperationCode, ErrorCode  # noqa
+from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, AdvectionRK4_3D, AdvectionAnalytical  # noqa
+from parcels import DiffusionUniformKh, AdvectionDiffusionM1, AdvectionDiffusionEM
+from parcels import FieldSet, RectilinearZGrid, ScipyParticle, JITParticle, Variable, StateCode, OperationCode, ErrorCode  # noqa
 from parcels import ParticleSetSOA, ParticleSetAOS
 from parcels import ParticleFileSOA, ParticleFileAOS
 from parcels import KernelSOA, KernelAOS
-from parcels.field import VectorField, NestedField, SummedField  # Field,
-# from parcels import plotTrajectoriesFile_loadedField
-# from parcels import rng as random
+from parcels.field import Field, VectorField, NestedField, SummedField
 from parcels import ParcelsRandom
-from datetime import timedelta as delta
-import time as ostime
+from argparse import ArgumentParser
+# from datetime import timedelta as delta
+# import time as ostime
 from glob import glob
 import math
-from argparse import ArgumentParser
 import datetime
 import numpy as np
-import xarray as xr
+from numpy.random import default_rng
+from scipy.interpolate import interpn
+from scipy import ndimage
+
 import fnmatch
 import sys
 import gc
 import os
 import string
+import time as ostime
+
+import xarray as xr
+import dask.array as da
+from netCDF4 import Dataset
+import h5py
 from parcels.tools import perlin3d
 from parcels.tools import perlin2d
 
-from scipy.interpolate import interpn
-from scipy import ndimage
-
-from PIL import Image
-import matplotlib.pyplot as plt
+from multiprocessing import Pool
 
 try:
     from mpi4py import MPI
 except:
     MPI = None
 with_GC = False
+DBG_MSG = False
 
-# pset = None
-pset_modes = ['soa', 'aos', 'nodes']
-ptype = {'scipy': ScipyParticle, 'jit': JITParticle}
-pset_types = {'soa': {'pset': ParticleSetSOA, 'pfile': ParticleFileSOA, 'kernel': KernelSOA},
-              'aos': {'pset': ParticleSetAOS, 'pfile': ParticleFileAOS, 'kernel': KernelAOS}}
-method = {'RK4': AdvectionRK4, 'EE': AdvectionEE, 'RK45': AdvectionRK45}
+# pset_modes = ['soa', 'aos', 'nodes']
+# ptype = {'scipy': ScipyParticle, 'jit': JITParticle}
+# pset_types = {'soa': {'pset': ParticleSetSOA, 'pfile': ParticleFileSOA, 'kernel': KernelSOA},
+#               'aos': {'pset': ParticleSetAOS, 'pfile': ParticleFileAOS, 'kernel': KernelAOS}}
+
+method = {'RK4': AdvectionRK4, 'RK45': AdvectionRK45, '3DRK4': AdvectionRK4_3D,
+          'EE': AdvectionEE, 'EM': AdvectionDiffusionEM, 'BM': DiffusionUniformKh}
 global_t_0 = 0
-fieldset = None
 Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
-#Nparticle = int(math.pow(2,11)) # equals to Nparticle = 2048
-#Nparticle = int(math.pow(2,12)) # equals to Nparticle = 4096
-#Nparticle = int(math.pow(2,13)) # equals to Nparticle = 8192
-#Nparticle = int(math.pow(2,14)) # equals to Nparticle = 16384
-#Nparticle = int(math.pow(2,15)) # equals to Nparticle = 32768
-#Nparticle = int(math.pow(2,16)) # equals to Nparticle = 65536
-#Nparticle = int(math.pow(2,17)) # equals to Nparticle = 131072
-#Nparticle = int(math.pow(2,18)) # equals to Nparticle = 262144
 #Nparticle = int(math.pow(2,19)) # equals to Nparticle = 524288
 
 noctaves=4
@@ -78,6 +75,10 @@ vol_shape = (int(math.pow(2,noctaves))*perlinres[1]*shapescale3D[1],
 # b = (100.0 * vol_shape[1])
 # c = (10.0 * vol_shape[2])
 
+a = 1.0
+b = 1.0
+c = 1.0
+
 tsteps = 61
 tscale = 6
 # scalefac = (40.0 / (1000.0/ (60.0 * 60.0)))  # 40 km/h
@@ -94,8 +95,68 @@ perlin_power_y = 0.45
 # for the depth domain, so that perlin4D = [depth][time][lat][lon].
 # then, we can do a transpose-op in numpy, to get [time][depth][lat][lon]
 
-# we need to modify the kernel.execute / pset.execute so that it returns from the JIT
-# in a given time WITHOUT writing to disk via outfie => introduce a pyloop_dt
+
+# -------------------------------------------------------------------------------------------------------------------- #
+
+def time_index_value(tx, _ft, _ft_dt=None):
+    # expect ft to be forward-linear
+    ft = _ft
+    if isinstance(_ft, xr.DataArray):
+        ft = ft.data
+    f_dt = _ft_dt
+    if f_dt is None:
+        f_dt = ft[1] - ft[0]
+        if type(f_dt) not in [np.float64, np.float32]:
+            f_dt = datetime.timedelta(f_dt).total_seconds()
+    # f_interp = (f_min + tx) / f_dt if f_dt >= 0 else (f_max + tx) / f_dt
+    f_interp = tx / f_dt
+    ti = int(math.floor(f_interp))
+    ti = max(0, min(ft.shape[0]-1, ti))
+    return ti
+
+
+def time_partion_value(tx, _ft, _ft_dt=None):
+    # expect ft to be forward-linear
+    ft = _ft
+    if isinstance(_ft, xr.DataArray):
+        ft = ft.data
+    f_dt = _ft_dt
+    if f_dt is None:
+        f_dt = ft[1] - ft[0]
+        if type(f_dt) not in [np.float64, np.float32]:
+            f_dt = datetime.timedelta(f_dt).total_seconds()
+    # f_interp = (f_min + tx) / f_dt if f_dt >= 0 else (f_max + tx) / f_dt
+    f_interp = abs(tx / f_dt)
+    f_interp = max(0.0, min(float(ft.shape[0]-1), f_interp))
+    f_t = f_interp - math.floor(f_interp)
+    return f_t
+
+# Helper function for time-conversion from teh calendar format
+def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="time array"):
+    """
+
+    :param t_array: 2D array of time values in either calendar- or float-time format; dim-0 = object entities, dim-1 = time steps (or 1D with just timesteps)
+    :param dt_minutes: expected delta_t als float-value (in minutes)
+    :param ns_per_sec: conversion value of number of nanoseconds within 1 second
+    :param debug: parameter telling to print debug messages or not
+    :param array_name: name of the array (for debug prints)
+    :return: converted t_array
+    """
+    ta = t_array
+    while len(ta.shape) > 1:
+        ta = ta[0]
+    if isinstance(ta[0], datetime.datetime) or isinstance(ta[0], datetime.timedelta) or isinstance(ta[0], np.timedelta64) or isinstance(ta[0], np.datetime64) or np.float64(ta[1]-ta[0]) > (dt_minutes+dt_minutes/2.0):
+        if debug:
+            print("{}.dtype before conversion: {}".format(array_name, t_array.dtype))
+        t_array = (t_array / ns_per_sec).astype(np.float64)
+        ta = (ta / ns_per_sec).astype(np.float64)
+        if debug:
+            print("{0}.range and {0}.dtype after conversion: ({1}, {2}) \t {3}".format(array_name, ta.min(), ta.max(), ta.dtype))
+    else:
+        if debug:
+            print("{0}.range and {0}.dtype: ({1}, {2}) \t {3} \t(no conversion applied)".format(array_name, ta.min(), ta.max(), ta.dtype))
+        pass
+    return t_array
 
 
 def DeleteParticle(particle, fieldset, time):
@@ -103,21 +164,6 @@ def DeleteParticle(particle, fieldset, time):
 
 
 def RenewParticle(particle, fieldset, time):
-    EA = fieldset.east_lim
-    WE = fieldset.west_lim
-    NO = fieldset.north_lim
-    SO = fieldset.south_lim
-
-    particle.lon = WE + ParcelsRandom.random() * (EA - WE)
-    particle.lat = SO + ParcelsRandom.random() * (NO - SO)
-    if fieldset.isThreeD > 0.0:
-        TO = fieldset.top
-        BO = fieldset.bottom
-        particle.depth = TO + ((BO-TO) / 0.75) + ((BO-TO) * -0.5 * ParcelsRandom.random())
-    particle.delete()
-
-
-def periodicBC(particle, fieldSet, time):
     EA = fieldset.east_lim
     WE = fieldset.west_lim
     dlon = EA - WE
@@ -132,6 +178,43 @@ def periodicBC(particle, fieldSet, time):
         particle.lat += dlat
     if particle.lat > NO:
         particle.lat -= dlat
+    if fieldset.isThreeD > 0.0:
+        TO = fieldset.top
+        BO = fieldset.bottom
+        if particle.depth < TO:
+            particle.depth = TO + 1.0
+        if particle.depth > BO:
+            particle.depth = BO - 1.0
+
+
+def periodicBC(particle, fieldSet, time):
+    EA = fieldset.east_lim
+    WE = fieldset.west_lim
+    dlon = EA - WE
+    NO = fieldset.north_lim
+    SO = fieldset.south_lim
+    dlat = NO - SO
+    if particle.lon < WE:
+    # if particle.lon < -(dlon/2.0):
+        # particle.lon += dlon
+        particle.lon = WE + (math.fabs(particle.lon) - math.fabs(WE))
+    if particle.lon > EA:
+    # if particle.lon > (dlon/2,0):
+        # particle.lon -= dlon
+        particle.lon = EA - (math.fabs(particle.lon) - math.fabs(EA))
+    if particle.lat < SO:
+        # particle.lat += dlat
+        particle.lat = SO + (math.fabs(particle.lat) - math.fabs(SO))
+    if particle.lat > NO:
+        # particle.lat -= dlat
+        particle.lat = NO - (math.fabs(particle.lat) - math.fabs(NO))
+    if fieldset.isThreeD > 0.0:
+        TO = fieldset.top
+        BO = fieldset.bottom
+        if particle.depth < TO:
+            particle.depth = TO + 1.0
+        if particle.depth > BO:
+            particle.depth = BO - 1.0
 
 
 def perIterGC():
@@ -161,7 +244,7 @@ def constant_top_bottom(particle, fieldset, time):
         particle.depth = fieldset.bottom
 
 
-def perlin_waves(periodic_wrap=False, write_out=False):
+def perlin_waves(periodic_wrap=False, write_out=False, anisotropic_diffusion=False):
     U_operator = np.array([[-0.3, -0.6, -1.0, 0.0, 1.0, 0.6, 0.3],
                            [-0.3, -0.6, -1.0, 0.0, 1.0, 0.6, 0.3],
                            [-0.3, -0.6, -1.0, 0.0, 1.0, 0.6, 0.3],
@@ -189,14 +272,14 @@ def perlin_waves(periodic_wrap=False, write_out=False):
     lat = np.linspace(-b*0.5, b*0.5, img_shape[1], dtype=np.float32)
     sys.stdout.write("lat field: {}\n".format(lat.size))
     totime = tsteps*tscale*24.0*60.0*60.0
-    time = np.linspace(0., totime, tsteps, dtype=np.float64)
-    sys.stdout.write("time field: {}\n".format(time.size))
+    times = np.linspace(0., totime, tsteps, dtype=np.float64)
+    sys.stdout.write("time field: {}\n".format(times.size))
 
     velmag = perlin2d.generate_fractal_noise_temporal2d(img_shape, tsteps, (perlinres[1], perlinres[2]), noctaves, perlin_persistence, max_shift=((-1, 2), (-1, 2)))
     abs_velmag = np.linalg.norm(velmag)
     # velmag = velmag / abs_velmag
 
-    pts = (time, lon, lat)
+    pts = (times, lon, lat)
     wave = np.empty(velmag.shape, dtype=velmag.dtype)
     total_items = velmag.shape[0] * velmag.shape[1] * velmag.shape[2]
     workdone = 0
@@ -204,10 +287,8 @@ def perlin_waves(periodic_wrap=False, write_out=False):
     for t in range(velmag.shape[0]):
         wave_x = np.empty((velmag.shape[1], velmag.shape[2]), dtype=velmag.dtype)
         wave_y = np.empty((velmag.shape[1], velmag.shape[2]), dtype=velmag.dtype)
-        # pts_x = np.stack((np.stack((np.ones(velmag.shape[2], dtype=velmag.dtype)*time[t], np.ones(velmag.shape[2], dtype=velmag.dtype)*lon[12]), axis=1), lat / 5.0), axis=1)
-        # pts_y = np.stack((np.stack((np.ones(velmag.shape[1], dtype=velmag.dtype)*time[t], lon / 5.0), axis=1), np.ones(velmag.shape[1], dtype=velmag.dtype)*lat[12]), axis=1)
-        pts_x = np.stack((np.ones(velmag.shape[2], dtype=velmag.dtype)*time[t], np.ones(velmag.shape[2], dtype=velmag.dtype)*lon[12], lat / 18.0), axis=1)
-        pts_y = np.stack((np.ones(velmag.shape[1], dtype=velmag.dtype)*time[t], lon / 18.0, np.ones(velmag.shape[1], dtype=velmag.dtype)*lat[12]), axis=1)
+        pts_x = np.stack((np.ones(velmag.shape[2], dtype=velmag.dtype)*times[t], np.ones(velmag.shape[2], dtype=velmag.dtype)*lon[12], lat / 18.0), axis=1)
+        pts_y = np.stack((np.ones(velmag.shape[1], dtype=velmag.dtype)*times[t], lon / 18.0, np.ones(velmag.shape[1], dtype=velmag.dtype)*lat[12]), axis=1)
         pValues_x = interpn(pts, velmag, pts_x)
         pValues_y = interpn(pts, velmag, pts_y)
         for i in range(velmag.shape[1]):
@@ -268,34 +349,58 @@ def perlin_waves(periodic_wrap=False, write_out=False):
 
     # U *= scalefac
     # V *= scalefac
+    Kh_zonal = None
+    Kh_meridional = None
+    if anisotropic_diffusion:
+        print("Generating anisotropic diffusion fields ...")
+        Kh_zonal = np.ones((lat.size, lon.size), dtype=np.float32) * 0.5 * 100.
+        Kh_meridional = np.empty((lat.size, lon.size), dtype=np.float32)
+        alpha = 1.  # Profile steepness
+        L = 1.  # Basin scale
+        # Ny = lat.shape[0]  # Number of grid cells in y_direction (101 +2, one level above and one below, where fields are set to zero)
+        # dy = 1.03 / Ny  # Spatial resolution
+        # y = np.linspace(-0.01, 1.01, 103)  # y-coordinates for grid
+        # y_K = np.linspace(0., 1., 101)  # y-coordinates used for setting diffusivity
+        beta = np.zeros(lat.shape[0])  # Placeholder for fraction term in K(y) formula
+
+        for yi in range(lat.shape[0]):
+            yk = ((lat[yi]*2.0 + b) / (2.0*b))
+            if yk < L / 2:
+                beta[yi] = yk * np.power(L - 2 * yk, 1 / alpha)
+            elif yk >= L / 2:
+                beta[yi] = (L - yk) * np.power(2 * yk - L, 1 / alpha)
+        Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
+        for i in range(lon.shape[0]):
+            for j in range(lat.shape[0]):
+                Kh_meridional[j, i] = Kh_meridional_profile[j] * 100.
+    else:
+        Kh_zonal = np.random.uniform(9.5, 10.5)  # in m^2/s
+        Kh_meridional = np.random.uniform(7.5, 12.5)  # in m^2/s
+        Kh_zonal, Kh_meridional = Kh_zonal * 100.0, Kh_meridional * 100.0  # because the mesh is flat
 
     data = {'U': U, 'V': V}
-    dimensions = {'time': time, 'lon': lon, 'lat': lat}
+    dimensions = {'time': times, 'lon': lon, 'lat': lat}
     fieldset = None
     if periodic_wrap:
-        fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=delta(days=366))
+        fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=datetime.timedelta(days=366))
     else:
         fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, allow_time_extrapolation=True)
+
     if write_out:
         fieldset.write(filename=write_out)
-
-        wave_img_path = os.path.join(os.path.dirname(write_out), 'wave_snapshot.png')
-        U_img_path = os.path.join(os.path.dirname(write_out), 'U_snapshot.png')
-        V_img_path = os.path.join(os.path.dirname(write_out), 'V_snapshot.png')
-
-        plt.imsave(wave_img_path, wave[0], cmap='gray', dpi=300)
-        # wave_img = Image.fromarray(wave[0], 'I')
-        # wave_img.save(wave_img_path)
-        plt.imsave(U_img_path, U[0], cmap='gray', dpi=300)
-        # U_img = Image.fromarray(U[0], 'I')
-        # U_img.save(U_img_path)
-        plt.imsave(V_img_path, V[0], cmap='gray', dpi=300)
-        # V_img = Image.fromarray(V[0], 'I')
-        # V_img.save(V_img_path)
-    return fieldset, a, b
+    if anisotropic_diffusion:
+        Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, mesh='flat')
+        fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=False, mesh='flat', transpose=False, allow_time_extrapolation=True))
+        fieldset.add_field(Field("Kh_meridional", Kh_meridional, grid=Kh_grid, to_write=False, mesh='flat', transpose=False, allow_time_extrapolation=True))
+        fieldset.add_constant("dres", max(lat[1]-lat[0], lon[1]-lon[0]))
+    else:
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh='flat')
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh='flat')
+    # return fieldset, a, b
+    return lon, lat, times, fieldset, U, W
 
 
-def perlin_waves3D(periodic_wrap=False, write_out=False):
+def perlin_waves3D(periodic_wrap=False, write_out=False, anisotropic_diffusion=False):
     U_operator = np.array([[-0.3, -0.6, -1.0, 0.0, 1.0, 0.6, 0.3],
                            [-0.3, -0.6, -1.0, 0.0, 1.0, 0.6, 0.3],
                            [-0.3, -0.6, -1.0, 0.0, 1.0, 0.6, 0.3],
@@ -338,14 +443,14 @@ def perlin_waves3D(periodic_wrap=False, write_out=False):
     depth = np.linspace(0.0, c, vol_shape[2], dtype=np.float32)
     sys.stdout.write("depth field: {}\n".format(depth.size))
     totime = tsteps*tscale*24.0*60.0*60.0
-    time = np.linspace(0., totime, tsteps, dtype=np.float64)
-    sys.stdout.write("time field: {}\n".format(time.size))
+    times = np.linspace(0., totime, tsteps, dtype=np.float64)
+    sys.stdout.write("time field: {}\n".format(times.size))
 
     velmag = perlin3d.generate_fractal_noise_temporal3d(vol_shape, tsteps, (perlinres[1], perlinres[2], perlinres[3]), noctaves, perlin_persistence, max_shift=((-1, 2), (-1, 2), (-1, 2)))
     abs_velmag = np.linalg.norm(velmag)
     # velmag = velmag / abs_velmag
 
-    pts = (time, lon, lat, depth)
+    pts = (times, lon, lat, depth)
     mix = int(velmag.shape[3]/4)
     depthgrad = np.concatenate([np.linspace(0, 1.0, mix, dtype=np.float32), np.linspace(1.0, 0.0, (velmag.shape[3]-mix-1), dtype=np.float32), np.zeros(1, dtype=np.float32)])
     wave = np.empty(velmag.shape, dtype=velmag.dtype)
@@ -355,8 +460,8 @@ def perlin_waves3D(periodic_wrap=False, write_out=False):
     ti = 0
     for t in range(velmag.shape[0]):
         wave_vol = np.empty((velmag.shape[1], velmag.shape[2], velmag.shape[3]), dtype=velmag.dtype)
-        pts_x = np.stack((np.ones(velmag.shape[2], dtype=velmag.dtype)*time[t], np.ones(velmag.shape[2], dtype=velmag.dtype)*lon[12], lat / 18.0, np.ones(velmag.shape[2], dtype=velmag.dtype)*depth[1]), axis=1)
-        pts_y = np.stack((np.ones(velmag.shape[1], dtype=velmag.dtype)*time[t], lon / 18.0, np.ones(velmag.shape[1], dtype=velmag.dtype)*lat[12], np.ones(velmag.shape[1], dtype=velmag.dtype)*depth[1]), axis=1)
+        pts_x = np.stack((np.ones(velmag.shape[2], dtype=velmag.dtype)*times[t], np.ones(velmag.shape[2], dtype=velmag.dtype)*lon[12], lat / 18.0, np.ones(velmag.shape[2], dtype=velmag.dtype)*depth[1]), axis=1)
+        pts_y = np.stack((np.ones(velmag.shape[1], dtype=velmag.dtype)*times[t], lon / 18.0, np.ones(velmag.shape[1], dtype=velmag.dtype)*lat[12], np.ones(velmag.shape[1], dtype=velmag.dtype)*depth[1]), axis=1)
         pValues_x = interpn(pts, velmag, pts_x)
         pValues_y = interpn(pts, velmag, pts_y)
         for i in range(velmag.shape[1]):
@@ -391,95 +496,62 @@ def perlin_waves3D(periodic_wrap=False, write_out=False):
     W[:, 0, :, :] = np.fabs(W[:, 0, :, :])
     wave = np.transpose(wave, (0,3,2,1))
 
+    Kh_zonal = None
+    Kh_meridional = None
+    if anisotropic_diffusion:
+        print("Generating anisotropic diffusion fields ...")
+        Kh_zonal = np.ones((lat.size, lon.size, depth.size), dtype=np.float32) * 0.5 * 100.
+        Kh_meridional = np.empty((lat.size, lon.size, depth.size), dtype=np.float32)
+        alpha = 1.  # Profile steepness
+        L = 1.  # Basin scale
+        # Ny = lat.shape[0]  # Number of grid cells in y_direction (101 +2, one level above and one below, where fields are set to zero)
+        # dy = 1.03 / Ny  # Spatial resolution
+        # y = np.linspace(-0.01, 1.01, 103)  # y-coordinates for grid
+        # y_K = np.linspace(0., 1., 101)  # y-coordinates used for setting diffusivity
+        beta = np.zeros(lat.shape[0])  # Placeholder for fraction term in K(y) formula
+
+        # for yi in range(len(y_K)):
+        for yi in range(lat.shape[0]):
+            yk = ((lat[yi]*2.0 + b) / (2.0*b))
+            if yk < L / 2:
+                beta[yi] = yk * np.power(L - 2 * yk, 1 / alpha)
+            elif yk >= L / 2:
+                beta[yi] = (L - yk) * np.power(2 * yk - L, 1 / alpha)
+        Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
+        for i in range(lon.shape[0]):
+            for j in range(lat.shape[0]):
+                Kh_meridional[j, i, :] = Kh_meridional_profile[j] * 100.
+    else:
+        print("Generating isotropic diffusion value ...")
+        # Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        # Kh_meridional = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+        # mesh_conversion = 1.0 / 1852. / 60 if fieldset.U.grid.mesh == 'spherical' else 1.0
+        Kh_zonal = np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        Kh_meridional = np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
+
     data = {'U': U, 'V': V, 'W': W}
-    dimensions = {'time': time, 'depth': depth, 'lon': lon, 'lat': lat}
+    dimensions = {'time': times, 'depth': depth, 'lon': lon, 'lat': lat}
     fieldset = None
     if periodic_wrap:
-        fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=delta(days=366))
+        fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=datetime.timedelta(days=366).total_seconds())
     else:
         fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, allow_time_extrapolation=True)
-    fieldset.add_constant("top", 0.001)
-    fieldset.add_constant("bottom", c)
-    if write_out:
-        fieldset.write(filename=write_out)
 
-        wave_img_path = os.path.join(os.path.dirname(write_out), 'wave_snapshot.png')
-        U_img_path = os.path.join(os.path.dirname(write_out), 'U_snapshot.png')
-        V_img_path = os.path.join(os.path.dirname(write_out), 'V_snapshot.png')
-        W_img_path = os.path.join(os.path.dirname(write_out), 'W_snapshot.png')
-
-        plt.imsave(wave_img_path, wave[0, 1], cmap='gray', dpi=300)
-        # wave_img = Image.fromarray(wave[0, 0], 'I')
-        # wave_img.save(wave_img_path)
-        plt.imsave(U_img_path, U[0, 1], cmap='gray', dpi=300)
-        # U_img = Image.fromarray(U[0, 0], 'I')
-        # U_img.save(U_img_path)
-        plt.imsave(V_img_path, V[0, 1], cmap='gray', dpi=300)
-        # V_img = Image.fromarray(V[0, 0], 'I')
-        # V_img.save(V_img_path)
-        plt.imsave(W_img_path, np.squeeze(W[0, :, 8, :]), cmap='gray', dpi=300)
-        # W_img = Image.fromarray(np.squeeze(W[0, :, 8, :]), 'I')
-        # W_img.save(W_img_path)
-    return fieldset, a, b, c
-
-
-def perlin_fieldset_from_numpy(periodic_wrap=False, write_out=False):
-    """Simulate a current from structured random noise (i.e. Perlin noise).
-    we use the external package 'perlin-numpy' as field generator, see:
-    https://github.com/pvigier/perlin-numpy
-
-    Perlin noise was introduced in the literature here:
-    Perlin, Ken (July 1985). "An Image Synthesizer". SIGGRAPH Comput. Graph. 19 (97–8930), p. 287–296.
-    doi:10.1145/325165.325247, https://dl.acm.org/doi/10.1145/325334.325247
-
-    :param write_out: False if no write-out; else the fieldset path+basename
-    """
-
-    a = (100.0 * img_shape[0])
-    b = (100.0 * img_shape[1])
-
-    # Coordinates of the test fieldset (on A-grid in deg)
-    lon = np.linspace(-a*0.5, a*0.5, img_shape[0], dtype=np.float32)
-    sys.stdout.write("lon field: {}\n".format(lon.size))
-    lat = np.linspace(-b*0.5, b*0.5, img_shape[1], dtype=np.float32)
-    sys.stdout.write("lat field: {}\n".format(lat.size))
-    totime = tsteps*tscale*24.0*60.0*60.0
-    time = np.linspace(0., totime, tsteps, dtype=np.float64)
-    sys.stdout.write("time field: {}\n".format(time.size))
-
-    # Define arrays U (zonal), V (meridional)
-    U = perlin2d.generate_fractal_noise_temporal2d(img_shape, tsteps, (perlinres[1], perlinres[2]), noctaves, perlin_persistence, max_shift=((-1, 2), (-1, 2)))
-    U = np.transpose(U, (0,2,1))
-    # U = np.swapaxes(U, 1, 2)
-    # print("U-statistics - min: {:10.7f}; max: {:10.7f}; avg. {:10.7f}; std_dev: {:10.7f}".format(U.min(initial=0), U.max(initial=0), U.mean(), U.std()))
-    V = perlin2d.generate_fractal_noise_temporal2d(img_shape, tsteps, (perlinres[1], perlinres[2]), noctaves, perlin_persistence, max_shift=((-1, 2), (-1, 2)))
-    V = np.transpose(V, (0,2,1))
-    # V = np.swapaxes(V, 1, 2)
-    # print("V-statistics - min: {:10.7f}; max: {:10.7f}; avg. {:10.7f}; std_dev: {:10.7f}".format(V.min(initial=0), V.max(initial=0), V.mean(), V.std()))
-
-    # U = perlin3d.generate_fractal_noise_3d(img_shape, perlinres, noctaves, perlin_persistence) * scalefac
-    # U = np.transpose(U, (0,2,1))
-    # sys.stdout.write("U field shape: {} - [tdim][ydim][xdim]=[{}][{}][{}]\n".format(U.shape, time.shape[0], lat.shape[0], lon.shape[0]))
-    # V = perlin3d.generate_fractal_noise_3d(img_shape, perlinres, noctaves, perlin_persistence) * scalefac
-    # V = np.transpose(V, (0,2,1))
-    # sys.stdout.write("V field shape: {} - [tdim][ydim][xdim]=[{}][{}][{}]\n".format(V.shape, time.shape[0], lat.shape[0], lon.shape[0]))
-
-    U *= scalefac
-    V *= scalefac
-
-    data = {'U': U, 'V': V}
-    dimensions = {'time': time, 'lon': lon, 'lat': lat}
-    fieldset = None
-    if periodic_wrap:
-        fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=delta(days=366))
+    if anisotropic_diffusion:
+        Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, depth=fieldset.U.depth, mesh='flat')
+        fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=True, mesh='flat', transpose=False, allow_time_extrapolation=True))
+        fieldset.add_field(Field("Kh_meridional", Kh_meridional, grid=Kh_grid, to_write=True, mesh='flat', transpose=False, allow_time_extrapolation=True))
+        fieldset.add_constant("dres", max(lat[1]-lat[0], lon[1]-lon[0]))
     else:
-        fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, allow_time_extrapolation=True)
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh='flat')
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh='flat')
+    fieldset.add_constant("dres", max(lat[1] - lat[0], lon[1] - lon[0]))
     if write_out:
         fieldset.write(filename=write_out)
-    return fieldset, a, b
+    return lon, lat, depth, times, fieldset, U, V, W
 
 
-def fieldset_from_file(periodic_wrap=False, filepath=None):
+def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, diffusion=False):
     """Simulate a current from structured random noise (i.e. Perlin noise).
     we use the external package 'perlin-numpy' as field generator, see:
     https://github.com/pvigier/perlin-numpy
@@ -490,23 +562,11 @@ def fieldset_from_file(periodic_wrap=False, filepath=None):
     """
     if filepath is None:
         return None
-    # img_shape = (perlinres[0]*shapescale[0], int(math.pow(2,noctaves))*perlinres[1]*shapescale[1], int(math.pow(2,noctaves))*perlinres[2]*shapescale[2])
-
-    # # Coordinates of the test fieldset (on A-grid in deg)
-    # lon = np.linspace(0, a, img_shape[1], dtype=np.float32)
-    # lat = np.linspace(0, b, img_shape[2], dtype=np.float32)
-    # totime = img_shape[0] * 24.0 * 60.0 * 60.0
-    # time = np.linspace(0., totime, img_shape[0], dtype=np.float32)
-
-    # dimensions = {'time': time, 'lon': lon, 'lat': lat}
-    # dims = ('time', 'lat', 'lon')
-
-    # variables = {'U': 'Uxr', 'V': 'Vxr'}
-    # dimensions = {'time': 'time', 'lat': 'lat', 'lon': 'lon'}
     extra_fields = {}
     head_dir = os.path.dirname(filepath)
     basename = os.path.basename(filepath)
     fname, fext = os.path.splitext(basename)
+    fext = ".nc" if len(fext) == 0 else fext
     flen = len(fname)
     field_fnames = glob(os.path.join(head_dir, fname+"*"+fext))
     for field_fname in field_fnames:
@@ -518,23 +578,35 @@ def fieldset_from_file(periodic_wrap=False, filepath=None):
         extra_fields = None
 
     a, b, c = 1.0, 1.0, 1.0
+    simtime_days = 366 if simtime_days is None else simtime_days
     fieldset = None
     if periodic_wrap:
-        fieldset = FieldSet.from_parcels(filepath, extra_fields=extra_fields, time_periodic=delta(days=366), deferred_load=True, allow_time_extrapolation=False, chunksize='auto')
-        # return FieldSet.from_xarray_dataset(ds, variables, dimensions, mesh='flat', time_periodic=delta(days=366))
+        fieldset = FieldSet.from_parcels(os.path.join(head_dir, fname), extra_fields=extra_fields, time_periodic=datetime.timedelta(days=simtime_days).total_seconds(), deferred_load=True, allow_time_extrapolation=False, chunksize=False)  # chunksize='auto'
     else:
-        fieldset = FieldSet.from_parcels(filepath, extra_fields=extra_fields, time_periodic=None, deferred_load=True, allow_time_extrapolation=True, chunksize='auto')
-        # return FieldSet.from_xarray_dataset(ds, variables, dimensions, mesh='flat', allow_time_extrapolation=True)
-    lon = fieldset.U.lon
-    a = lon[len(lon)-1] - lon[0]
-    lat = fieldset.V.lat
-    b = lat[len(lat) - 1] - lat[0]
-    if "W" in extra_fields:
-        depth = fieldset.W.depth
-        c = depth[len(depth)-1] - depth[0]
-        fieldset.add_constant("top", depth[0] + 0.001)
-        fieldset.add_constant("bottom", depth[len(depth)-1] - 0.001)
-    return fieldset, a, b, c
+        fieldset = FieldSet.from_parcels(os.path.join(head_dir, fname), extra_fields=extra_fields, time_periodic=None, deferred_load=True, allow_time_extrapolation=True, chunksize=False)  # chunksize='auto'
+
+    ftimes = fieldset.U.grid.time
+    flons = fieldset.U.lon
+    a = flons[len(flons) - 1] - flons[0]
+    flats = fieldset.V.lat
+    b = flats[len(flats) - 1] - flats[0]
+    fdepths = None
+    # if "W" in extra_fields:
+    if extra_fields is not None and "W" in extra_fields:
+        fdepths = fieldset.W.depth
+        c = fdepths[len(fdepths)-1] - fdepths[0]
+        # fieldset.add_constant("top", depth[0] + 0.001)
+        # fieldset.add_constant("bottom", depth[len(depth)-1] - 0.001)
+
+    Kh_zonal = None
+    Kh_meridional = None
+    if diffusion:
+        Kh_zonal = np.random.uniform(9.5, 10.5)  # in m^2/s
+        Kh_meridional = np.random.uniform(7.5, 12.5)  # in m^2/s
+        Kh_zonal, Kh_meridional = Kh_zonal * 100.0, Kh_meridional * 100.0  # because the mesh is flat
+        fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh="flat")
+        fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh="flat")
+    return flons, flats, fdepths, ftimes, fieldset, a, b, c
 
 
 def getU():
@@ -550,15 +622,16 @@ def getW():
 
 
 class AgeParticle_JIT(JITParticle):
-    age = Variable('age', dtype=np.float64, initial=0.0)
-    life_expectancy = Variable('life_expectancy', dtype=np.float64, initial=np.finfo(np.float64).max)
-    initialized_dynamic = Variable('initialized_dynamic', dtype=np.int32, initial=0)
-
+    age = Variable('age', dtype=np.float64, initial=0.0, to_write=True)
+    age_d = Variable('age_d', dtype=np.float32, initial=0.0, to_write=True)
+    life_expectancy = Variable('life_expectancy', dtype=np.float64, initial=np.finfo(np.float64).max, to_write=False)
+    initialized_dynamic = Variable('initialized_dynamic', dtype=np.int32, initial=0, to_write=False)
 
 class AgeParticle_SciPy(ScipyParticle):
     age = Variable('age', dtype=np.float64, initial=0.0)
-    life_expectancy = Variable('life_expectancy', dtype=np.float64, initial=np.finfo(np.float64).max)
-    initialized_dynamic = Variable('initialized_dynamic', dtype=np.int32, initial=0)
+    age_d = Variable('age_d', dtype=np.float32, initial=0.0, to_write=True)
+    life_expectancy = Variable('life_expectancy', dtype=np.float64, initial=np.finfo(np.float64).max, to_write=False)
+    initialized_dynamic = Variable('initialized_dynamic', dtype=np.int32, initial=0, to_write=False)
 
 
 def initialize(particle, fieldset, time):
@@ -570,84 +643,225 @@ def initialize(particle, fieldset, time):
         # particle.life_expectancy = time+ParcelsRandom.uniform(.0, fieldset.life_expectancy) * ((3.0/2.0)**2.0)
         particle.initialized_dynamic = 1
 
-
 def Age(particle, fieldset, time):
     if particle.state == StateCode.Evaluate:
         particle.age = particle.age + math.fabs(particle.dt)
+        particle.age_d = particle.age/86400.0
     if particle.age > particle.life_expectancy:
         particle.delete()
 
+
+def UniformDiffusion(particle, fieldset, time):
+    dWx = 0.
+    dWy = 0.
+    bx = 0.
+    by = 0.
+
+    if particle.state == StateCode.Evaluate:
+        # dWt = 0.
+        dWt = math.sqrt(math.fabs(particle.dt))
+        dWx = ParcelsRandom.normalvariate(0, dWt)
+        dWy = ParcelsRandom.normalvariate(0, dWt)
+        bx = math.sqrt(2 * fieldset.Kh_zonal)
+        by = math.sqrt(2 * fieldset.Kh_meridional)
+
+    particle.lon += bx * dWx
+    particle.lat += by * dWy
+
+
+def sample_regularly_jittered(lon_range, lat_range, depth_range=None, res=1.0):
+    """
+
+    :param lon_range:
+    :param lat_range:
+    :param res: number of cells (in each direction) per arc degree or metre
+    :return:
+    """
+    samples_lon = []
+    samples_lat = []
+    samples_depth = None if depth_range is None else []
+    jitter = np.random.random(3) * 1/res
+    lat_buckets = int(np.floor((lat_range[1]-lat_range[0])*res))-1
+    lon_buckets = int(np.floor((lon_range[1]-lon_range[0])*res))-1
+    vertical_scale = 1.0/(res*75.0)
+    jitter[2] = np.random.random() * (vertical_scale/2.0)
+    depth_buckets = 0 if depth_range is None else int(np.floor((depth_range[1]-depth_range[0])*vertical_scale))-1
+    for i in range(lat_buckets):
+        for j in range(lon_buckets):
+            for k in range(depth_buckets):
+                # sample = [jitter[0]+lon_range[0]+(j*(1/res))/(lon_range[1]-lon_range[0]), jitter[1]+lat_range[0]+(i*(1/res))/(lat_range[1]-lat_range[0])]
+                sample = [jitter[0] + lon_range[0] + (j * (1 / res)),
+                          jitter[1] + lat_range[0] + (i * (1 / res))]
+                if depth_range is not None:
+                    sample.append(jitter[2] + depth_range[0] + (k * (1 / vertical_scale)))
+                samples_lon.append(sample[0])
+                samples_lat.append(sample[1])
+                if depth_range is not None:
+                    samples_depth.append(sample[2])
+                del sample
+    # samples_lon = np.unique(samples_lon)
+    # samples_lat = np.unique(samples_lat)
+    return samples_lon, samples_lat, samples_depth
+
+
+def rsample(low, high, size, sample_string):
+    sample = None
+    rng_sampler = default_rng()
+    if sample_string == 'uniform':
+        sample = rng_sampler.uniform(low, high, size)
+    elif sample_string == 'gaussian':
+        sample = rng_sampler.normal(0.0, 0.5, size) + 0.5
+        sample[sample < 0] = 0.0
+        sample[sample > 1] = 1.0
+        sample = sample*(high-low) + low
+    elif sample_string == 'triangular':
+        mid = low + (high-low)/2.0
+        sample = rng_sampler.triangular(low, mid, high, size)
+    elif sample_string == 'vonmises':
+        sample = rng_sampler.vonmises(0, 1/math.sqrt(2.0), size)+0.5
+        sample[sample < 0] = 0.0
+        sample[sample > 1] = 1.0
+        sample = sample*(high-low) + low
+    return sample
+
+
+def sample_irregularly(lon_range, lat_range, depth_range=None, res=None, rsampler_str='uniform', nparticle=None):
+    """
+
+    :param lon_range:
+    :param lat_range:
+    :param res: square-root of particles per sauqre-arc degree or metre
+    :param nparticle:
+    :return:
+    """
+    samples_lon = []
+    samples_lat = []
+    samples_depth = None if depth_range is None else []
+    if res != None:
+        llon = np.floor(lon_range[0])
+        llat = np.floor(lat_range[0])
+        ldepth = 0. if depth_range is None else np.floor(depth_range[0])
+        lat_buckets = int(np.floor((lat_range[1]-lat_range[0])))-1
+        lon_buckets = int(np.floor((lon_range[1]-lon_range[0])))-1
+        depth_buckets = 0 if depth_range is None else int(np.floor((depth_range[1]-depth_range[0])))-1
+        deg_scale = 1.0
+        vertical_scale = 1.0
+        local_nparticle = int(res**2) if depth_range in None else int(res**3)
+        if res<1.0:
+            deg_scale = int(np.round(1/res))
+            vertical_scale = int(np.round(res*75.0))
+            local_nparticle = 1
+        for i in range(lat_buckets):
+            for j in range(lon_buckets):
+                for k in range(depth_buckets):
+                    lows = [llon+(j*deg_scale), llat+(i*deg_scale)] if depth_range is None else [llon+(j*deg_scale), llat+(i*deg_scale), ldepth+(k*vertical_scale)]
+                    highs = [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale)] if depth_range is None else [llon+(j+1)*deg_scale, llat+((i+1)*deg_scale), ldepth+((k+1)*vertical_scale)]
+                    local_samples = rsample(lows, highs, local_nparticle, rsampler_str)
+                    samples_lon.append(local_samples[0,:])
+                    samples_lat.append(local_samples[1,:])
+                    if depth_range is not None:
+                        samples_depth.append(local_samples[2,:])
+    else:
+        assert type(nparticle) in (int, np.int32, np.uint32, np.int64, np.uint64)
+        samples_lon = np.random.uniform(lon_range[0], lon_range[1], nparticle)
+        samples_lat = np.random.uniform(lat_range[0], lat_range[1], nparticle)
+        if depth_range is not None:
+            samples_depth = np.random.uniform(depth_range[0], depth_range[1], nparticle)
+    return samples_lon, samples_lat, samples_depth
+
+
+def sample_particles(lon_range, lat_range, depth_range=None, res=None, rsampler_str='regular_jitter', nparticle=None):
+    if rsampler_str == 'regular_jitter':
+        assert res is not None
+        return sample_regularly_jittered(lon_range, lat_range, depth_range=depth_range, res=res)
+    else:
+        return sample_irregularly(lon_range, lat_range, depth_range=depth_range, res=res, rsampler_str=rsampler_str, nparticle=nparticle)
 
 age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
 
 if __name__=='__main__':
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
-    parser.add_argument("-i", "--imageFileName", dest="imageFileName", type=str, default="benchmark_perlin.png", help="image file name of the plot")
-    parser.add_argument("-b", "--backwards", dest="backwards", action='store_true', default=False, help="enable/disable running the simulation backwards")
-    parser.add_argument("-p", "--periodic", dest="periodic", action='store_true', default=False, help="enable/disable periodic wrapping (else: extrapolation)")
-    parser.add_argument("-r", "--release", dest="release", action='store_true', default=False, help="continuously add particles via repeatdt (default: False)")
-    parser.add_argument("-rt", "--releasetime", dest="repeatdt", type=int, default=720, help="repeating release rate of added particles in Minutes (default: 720min = 12h)")
-    parser.add_argument("-a", "--aging", dest="aging", action='store_true', default=False, help="Removed aging particles dynamically (default: False)")
+    parser.add_argument("-f", "--filename", dest="filename", type=str, default="file.txt", help="(relative) (text) file path of the csv hyper parameters")
+    # parser.add_argument("-i", "--imageFileName", dest="imageFileName", type=str, default="benchmark_perlin.png", help="image file name of the plot")
+    # parser.add_argument("-b", "--backwards", dest="backwards", action='store_true', default=False, help="enable/disable running the simulation backwards")
+    # parser.add_argument("-p", "--periodic", dest="periodic", action='store_true', default=False, help="enable/disable periodic wrapping (else: extrapolation)")
+
+    # parser.add_argument("-r", "--release", dest="release", action='store_true', default=False, help="continuously add particles via repeatdt (default: False)")
+    # parser.add_argument("-rt", "--releasetime", dest="repeatdt", type=int, default=720, help="repeating release rate of added particles in Minutes (default: 720min = 12h)")
+    # parser.add_argument("-a", "--aging", dest="aging", action='store_true', default=False, help="Removed aging particles dynamically (default: False)")
+
     parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=1, help="runtime in days (default: 1)")
-    parser.add_argument("-w", "--writeout", dest="write_out", action='store_true', default=False, help="write data in outfile")
+    parser.add_argument("-dt", "--deltatime", dest="dt", type=int, default=720, help="computational delta_t time stepping in minutes (default: 720min = 12h)")
+    parser.add_argument("-ot", "--outputtime", dest="outdt", type=int, default=1440, help="repeating release rate of added particles in minutes (default: 1440min = 24h)")
+    parser.add_argument("-im", "--interp_mode", dest="interp_mode", choices=['rk4','rk45', 'ee', 'em', 'm1', 'bm'], default="rk4", help="interpolation mode = [rk4, rk45, ee (Eulerian Estimation), em (Euler-Maruyama), m1 (Milstein-1), bm (Brownian Motion)]")
+    # parser.add_argument("-w", "--writeout", dest="write_out", action='store_true', default=False, help="write data in outfile")
     parser.add_argument("-d", "--delParticle", dest="delete_particle", action='store_true', default=False, help="switch to delete a particle (True) or reset a particle (default: False).")
-    parser.add_argument("-A", "--animate", dest="animate", action='store_true', default=False, help="animate the particle trajectories during the run or not (default: False).")
-    parser.add_argument("-V", "--visualize", dest="visualize", action='store_true', default=False, help="Visualize particle trajectories at the end (default: False). Requires -w in addition to take effect.")
+
+    # parser.add_argument("-A", "--animate", dest="animate", action='store_true', default=False, help="animate the particle trajectories during the run or not (default: False).")
+    # parser.add_argument("-V", "--visualize", dest="visualize", action='store_true', default=False, help="Visualize particle trajectories at the end (default: False). Requires -w in addition to take effect.")
     parser.add_argument("-N", "--n_particles", dest="nparticles", type=str, default="2**6", help="number of particles to generate and advect (default: 2e6)")
-    parser.add_argument("-sN", "--start_n_particles", dest="start_nparticles", type=str, default="96", help="(optional) number of particles generated per release cycle (if --rt is set) (default: 96)")
-    parser.add_argument("-m", "--mode", dest="compute_mode", choices=['jit','scipy'], default="jit", help="computation mode = [JIT, SciPy]")
-    parser.add_argument("-tp", "--type", dest="pset_type", default="soa", help="particle set type = [SOA, AOS]")
-    parser.add_argument("-G", "--GC", dest="useGC", action='store_true', default=False, help="using a garbage collector (default: false)")
+    # parser.add_argument("-sN", "--start_n_particles", dest="start_nparticles", type=str, default="96", help="(optional) number of particles generated per release cycle (if --rt is set) (default: 96)")
+    # parser.add_argument("-m", "--mode", dest="compute_mode", choices=['jit','scipy'], default="jit", help="computation mode = [JIT, SciPy]")
+    # parser.add_argument("-tp", "--type", dest="pset_type", default="soa", help="particle set type = [SOA, AOS]")
+    # parser.add_argument("-G", "--GC", dest="useGC", action='store_true', default=False, help="using a garbage collector (default: false)")
+
+    parser.add_argument("-sres", "--sample_resolution", dest="sres", type=str, default="2", help="number of particle samples per arc-dgree (default: 2)")
+    parser.add_argument("-gres", "--grid_resolution", dest="gres", type=str, default="10", help="number of cells per arc-degree or metre (default: 10)")
+    parser.add_argument("-sm", "--samplemode", dest="sample_mode", choices=['regular_jitter','uniform','gaussian','triangular','vonmises'], default='regular_jitter', help="sampling distribution mode = [regular_jitter, (irregular) uniform, (irregular) gaussian, (irregular) triangular, (irregular) vonmises]")
+    parser.add_argument("-fsx", "--field_sx", dest="field_sx", type=int, default="480", help="number of original field cells in x-direction")
+    parser.add_argument("-fsy", "--field_sy", dest="field_sy", type=int, default="240", help="number of original field cells in y-direction")
+    parser.add_argument("-fsz", "--field_sz", dest="field_sz", type=int, default="20", help="number of original field cells in z-direction")
     parser.add_argument("-3D", "--threeD", dest="threeD", action='store_true', default=False, help="make a 3D-simulation (default: False).")
+    parser.add_argument("-pint", "--integrate", dest="integrate_particles", action='store_true', default=False, help="Integrate Lagrange information, e.g. age, density etc. (default: False)")
+    parser.add_argument("-tint", "--time_interpolate", dest="time_interpolation", action='store_true', default=False, help="Interpolate field data in time to daily (i.e. split) output (default: False)")
     args = parser.parse_args()
 
-    pset_type = str(args.pset_type).lower()
-    assert pset_type in pset_types
-    ParticleSet = pset_types[pset_type]['pset']
+    ParticleSet = ParticleFileSOA
 
-    imageFileName=args.imageFileName
-    periodicFlag=args.periodic
-    backwardSimulation = args.backwards
-    repeatdtFlag=args.release
-    repeatRateMinutes=args.repeatdt
+    filename=args.filename
+
+    periodicFlag=True
+    repeatRateMinutes=720
     time_in_days = args.time_in_days
     time_in_years = int(float(time_in_days)/365.0)
-    agingParticles = args.aging
-    with_GC = args.useGC
+    writeout = True
+    with_GC = True
+
     Nparticle = int(float(eval(args.nparticles)))
-    target_N = Nparticle
+    target_N = Nparticle if Nparticle > 0 else None
+
     addParticleN = 1
-    # np_scaler = math.sqrt(3.0/2.0)
-    # np_scaler = (3.0 / 2.0)**2.0       # **
     np_scaler = 3.0 / 2.0
-    # cycle_scaler = math.sqrt(3.0/2.0)
-    # cycle_scaler = (3.0 / 2.0)**2.0    # **
-    # cycle_scaler = 3.0 / 2.0
     cycle_scaler = 7.0 / 4.0
-    start_N_particles = int(float(eval(args.start_nparticles)))
+
+    # start_N_particles = int(float(eval(args.start_nparticles)))
+    start_N_particles = Nparticle
+    sres = int(float(eval(args.sres)))
+    gres = float(eval(args.gres))
+    integrate_particles = args.integrate_particles
+    interpolate_particles = args.time_interpolation
+    sample_mode = args.sample_mode
+    interp_mode = args.interp_mode
+    compute_mode = 'jit'
 
     if MPI:
         mpi_comm = MPI.COMM_WORLD
         if mpi_comm.Get_rank() == 0:
-            if agingParticles and not repeatdtFlag:
-                sys.stdout.write("N: {} ( {} )\n".format(Nparticle, int(Nparticle * np_scaler)))
-            else:
-                sys.stdout.write("N: {}\n".format(Nparticle))
-    else:
-        if agingParticles and not repeatdtFlag:
-            sys.stdout.write("N: {} ( {} )\n".format(Nparticle, int(Nparticle * np_scaler)))
-        else:
             sys.stdout.write("N: {}\n".format(Nparticle))
+    else:
+        sys.stdout.write("N: {}\n".format(Nparticle))
 
-    dt_minutes = 60
+    dt_minutes = args.dt
+    outdt_minutes = args.outdt
     nowtime = datetime.datetime.now()
     ParcelsRandom.seed(nowtime.microsecond)
-
-    a, b, c = 1.0, 1.0, 1.0
+    np.random.seed(0)
     use_3D = args.threeD
 
+    a, b, c = 1.0, 1.0, 1.0
+
     # fnmatch.fnmatchcase(os.uname()[2], "*.el*_*.x86_64*")
-    branch = "soa_benchmark"
+    branch = "LOMUQ"
     computer_env = "local/unspecified"
     scenario = "perlin"
     odir = ""
@@ -666,265 +880,1367 @@ if __name__=='__main__':
         SNELLIUS_SCRATCH_USERNAME = 'ckehluu'
         odir = "/scratch-shared/{}/experiments/parcels_benchmarking/{}".format(SNELLIUS_SCRATCH_USERNAME, str(args.pset_type))
         computer_env = "Snellius"
+    elif fnmatch.fnmatchcase(os.uname()[1], "PROMETHEUS"):  # Prometheus computer - use USB drive
+        PROMETHEUS_SCRATCH_USERNAME = 'christian'
+        odir = "/media/{}/DATA/data/hydrodynamics/perlin3d/".format(PROMETHEUS_SCRATCH_USERNAME)
+        computer_env = "Prometheus"
     else:
         odir = "/var/scratch/experiments/{}".format(str(args.pset_type))
     print("running {} on {} (uname: {}) - branch '{}' - (target) N: {} - argv: {}".format(scenario, computer_env, os.uname()[1], branch, target_N, sys.argv[1:]))
+    if not os.path.exists(odir):
+        os.mkdir(odir)
 
-    if os.path.sep in imageFileName:
-        head_dir = os.path.dirname(imageFileName)
+    if os.path.sep in filename:
+        head_dir = os.path.dirname(filename)
         if head_dir[0] == os.path.sep:
             odir = head_dir
         else:
             odir = os.path.join(odir, head_dir)
-            imageFileName = os.path.split(imageFileName)[1]
-    pfname, pfext = os.path.splitext(imageFileName)
+            imageFileName = os.path.split(filename)[1]
+    pfname, pfext = os.path.splitext(filename)
+    if not os.path.exists(odir):
+        os.makedirs(odir)
 
-    func_time = []
-    mem_used_GB = []
-
-    np.random.seed(0)
-    global fieldset
+    # global fieldset
+    fieldset = None
+    flons = None
+    flats = None
+    fdepths = None
+    ftimes = None
+    U = None
+    V = None
+    W = None
     field_fpath = False
-    if args.write_out:
+    if writeout:
         field_fpath = os.path.join(odir,"perlin")
     if field_fpath and os.path.exists(field_fpath+"U.nc"):
-        fieldset, a, b, c = fieldset_from_file(periodic_wrap=periodicFlag, filepath=field_fpath)
+        flons, flats, fdepths, ftimes, fieldset, a, b, c = fieldset_from_file(periodic_wrap=periodicFlag, filepath=field_fpath)  #  field_fpath+".nc"
         use_3D &= hasattr(fieldset, "W")
+        U = fieldset.U
+        V = fieldset.V
+        if hasattr(fieldset, "W"):
+            W = fieldset.W
+        if fdepths is None:
+            use_3D = False
     else:
         if not use_3D:
-            fieldset, a, b = perlin_waves(periodic_wrap=periodicFlag, write_out=field_fpath)
+            flons, flats, ftimes, fieldset, U, V = perlin_waves(periodic_wrap=periodicFlag, write_out=field_fpath, anisotropic_diffusion=False)
         else:
-            fieldset, a, b, c = perlin_waves3D(periodic_wrap=periodicFlag, write_out=field_fpath)
+            #periodic_wrap=False, write_out=False, anisotropic_diffusion=False
+            flons, flats, fdepths, ftimes, fieldset, U, V, W = perlin_waves3D(periodic_wrap=periodicFlag, write_out=field_fpath, anisotropic_diffusion=False)
+            use_W = True
     fieldset.add_constant("east_lim", +a * 0.5)
     fieldset.add_constant("west_lim", -a * 0.5)
     fieldset.add_constant("north_lim", +b * 0.5)
     fieldset.add_constant("south_lim", -b * 0.5)
+    fieldset.add_constant("top", 0.001)
+    fieldset.add_constant("bottom", c)
     fieldset.add_constant("isThreeD", 1.0 if use_3D else -1.0)
 
-    if args.compute_mode == 'scipy':
-        Nparticle = 2**10
 
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        mpi_rank = mpi_comm.Get_rank()
-        if mpi_rank==0:
-            global_t_0 = ostime.process_time()
+    out_fname = "benchmark_perlin"
+    if MPI and (MPI.COMM_WORLD.Get_size()>1):
+        out_fname += "_MPI" + "_n{}".format(MPI.COMM_WORLD.Get_size())
+        pfname += "_MPI" + "_n{}".format(MPI.COMM_WORLD.Get_size())
     else:
-        global_t_0 = ostime.process_time()
+        out_fname += "_noMPI"
+        pfname += "_noMPI"
+    if periodicFlag:
+        out_fname += "_p"
+        pfname += '_p'
+    out_fname += "_n"+str(Nparticle)
+    pfname += "_n"+str(Nparticle)
+    # if time_in_years != 1:
+    #     out_fname += '_%dy' % (time_in_years, )
+    #     pfname += '_%dy' % (time_in_years, )
+    out_fname += '_%dd' % (time_in_days, )
+    pfname += '_%dd' % (time_in_days, )
+    if with_GC:
+        out_fname += "_wGC"
+        pfname += "_wGC"
+    else:
+        out_fname += "_woGC"
+    if use_3D:
+        out_fname += "_3D"
+        pfname += "_3D"
+        pfname += "_woGC"
 
-    simStart = None
-    for f in fieldset.get_fields():
-        if type(f) in [VectorField, NestedField, SummedField]:  # or not f.grid.defer_load
-            continue
+    if not os.path.exists(os.path.join(odir, out_fname + ".nc")):
+        # ==== ==== ==== ==== ==== #
+        # == EXECUTE SIMULATION == #
+        # ==== ==== ==== ==== ==== #
+        if MPI:
+            mpi_comm = MPI.COMM_WORLD
+            mpi_rank = mpi_comm.Get_rank()
+            if mpi_rank==0:
+                global_t_0 = ostime.process_time()
         else:
-            if backwardSimulation:
-                simStart=f.grid.time_full[-1]
+            global_t_0 = ostime.process_time()
+
+        simStart = None
+        for f in fieldset.get_fields():
+            if type(f) in [VectorField, NestedField, SummedField]:  # or not f.grid.defer_load
+                continue
             else:
                 simStart = f.grid.time_full[0]
-            break
+                break
 
-    if agingParticles:
-        if not repeatdtFlag:
-            Nparticle = int(Nparticle * np_scaler)
-        fieldset.add_constant('life_expectancy', delta(days=time_in_days).total_seconds())
-    if repeatdtFlag:
-        addParticleN = Nparticle/2.0
-        refresh_cycle = (delta(days=time_in_days).total_seconds() / (addParticleN/start_N_particles)) / cycle_scaler
-        if agingParticles:
-            refresh_cycle /= cycle_scaler
-        repeatRateMinutes = int(refresh_cycle/60.0) if repeatRateMinutes == 720 else repeatRateMinutes
+        start_scaler = 1.0
+        add_scaler = 1.0
 
-    pt_ndims = 3 if use_3D else 2
-    if backwardSimulation:
-        # ==== backward simulation ==== #
-        if agingParticles:
-            if repeatdtFlag:
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(args.compute_mode).lower()], lon=np.random.rand(start_N_particles, 1) * (-a) + (a/2.0), lat=np.random.rand(start_N_particles, 1) * (-b) + (b/2.0), depth=np.random.rand(start_N_particles, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                if pset_type != 'nodes':
-                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(args.compute_mode).lower()], lon=np.random.rand(int(addParticleN), 1) * (-a) + (a/2.0), lat=np.random.rand(int(addParticleN), 1) * (-b) + (b/2.0), depth=np.random.rand(int(addParticleN), 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-                    pset.add(psetA)
-                else:
-                    lonlat_field = np.random.rand(int(addParticleN), pt_ndims)
-                    marr = np.array([a, b, c/2]) if use_3D else np.array([a, b])
-                    lonlat_field *= marr
-                    lonlat_field[:, 0] = -lonlat_field[:, 0] + (a / 2.0)
-                    lonlat_field[:, 1] = -lonlat_field[:, 1] + (b / 2.0)
-                    if use_3D:
-                        lonlat_field[:, 2] = -lonlat_field[:, 2] + (c * 0.75)
-                    time_field = np.ones((int(addParticleN), 1), dtype=np.float64) * simStart
-                    # pdata = np.concatenate( (lonlat_field, time_field), axis=1 )
-                    pdata = {'lon': lonlat_field[:, 0], 'lat': lonlat_field[:, 1], 'time': time_field}
-                    pset.add(pdata)
-            else:
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(args.compute_mode).lower()], lon=np.random.rand(Nparticle, 1) * (-a) + (a/2.0), lat=np.random.rand(Nparticle, 1) * (-b) + (b/2.0), depth=np.random.rand(Nparticle, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-        else:
-            if repeatdtFlag:
-                pset = ParticleSet(fieldset=fieldset, pclass=ptype[(args.compute_mode).lower()], lon=np.random.rand(start_N_particles, 1) * (-a) + (a/2.0), lat=np.random.rand(start_N_particles, 1) * (-b) + (b/2.0), depth=np.random.rand(start_N_particles, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                if pset_type != 'nodes':
-                    psetA = ParticleSet(fieldset=fieldset, pclass=ptype[(args.compute_mode).lower()], lon=np.random.rand(int(addParticleN), 1) * (-a) + (a/2.0), lat=np.random.rand(int(addParticleN), 1) * (-b) + (b/2.0), depth=np.random.rand(int(addParticleN), 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-                    pset.add(psetA)
-                else:
-                    lonlat_field = np.random.rand(int(addParticleN), pt_ndims)
-                    marr = np.array([a, b, c/2]) if use_3D else np.array([a, b])
-                    lonlat_field *= marr
-                    lonlat_field[:, 0] = -lonlat_field[:, 0] + (a / 2.0)
-                    lonlat_field[:, 1] = -lonlat_field[:, 1] + (b / 2.0)
-                    if use_3D:
-                        lonlat_field[:, 2] = -lonlat_field[:, 2] + (c * 0.75)
-                    time_field = np.ones((int(addParticleN), 1), dtype=np.float64) * simStart
-                    # pdata = np.concatenate( (lonlat_field, time_field), axis=1 )
-                    pdata = {'lon': lonlat_field[:, 0], 'lat': lonlat_field[:, 1], 'time': time_field}
-                    pset.add(pdata)
-            else:
-                pset = ParticleSet(fieldset=fieldset, pclass=ptype[(args.compute_mode).lower()], lon=np.random.rand(Nparticle, 1) * (-a) + (a/2.0), lat=np.random.rand(Nparticle, 1) * (-b) + (b/2.0), depth=np.random.rand(Nparticle, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-    else:
+        # making sure we do track age, but life expectancy is a hard full simulation time #
+        fieldset.add_constant('life_expectancy', datetime.timedelta(days=time_in_days).total_seconds())
+        age_ptype[(compute_mode).lower()].life_expectancy.initial = datetime.timedelta(days=time_in_days).total_seconds()
+        age_ptype[(compute_mode).lower()].initialized_dynamic.initial = 1
+        target_N = Nparticle if target_N is not None else None
+
+        print("Sampling the grid and creating the particle set now ...")
         # ==== forward simulation ==== #
-        if agingParticles:
-            if repeatdtFlag:
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(args.compute_mode).lower()], lon=np.random.rand(start_N_particles, 1) * (-a) + (a/2.0), lat=np.random.rand(start_N_particles, 1) * (-b) + (b/2.0), depth=np.random.rand(start_N_particles, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                if pset_type != 'nodes':
-                    psetA = ParticleSet(fieldset=fieldset, pclass=age_ptype[(args.compute_mode).lower()], lon=np.random.rand(int(addParticleN), 1) * (-a) + (a/2.0), lat=np.random.rand(int(addParticleN), 1) * (-b) + (b/2.0), depth=np.random.rand(int(addParticleN), 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-                    pset.add(psetA)
-                else:
-                    lonlat_field = np.random.rand(int(addParticleN), pt_ndims)
-                    marr = np.array([a, b, c/2]) if use_3D else np.array([a, b])
-                    lonlat_field *= marr
-                    lonlat_field[:, 0] = -lonlat_field[:, 0] + (a / 2.0)
-                    lonlat_field[:, 1] = -lonlat_field[:, 1] + (b / 2.0)
-                    if use_3D:
-                        lonlat_field[:, 2] = -lonlat_field[:, 2] + (c * 0.75)
-                    time_field = np.ones((int(addParticleN), 1), dtype=np.float64) * simStart
-                    # pdata = np.concatenate( (lonlat_field, time_field), axis=1 )
-                    pdata = {'lon': lonlat_field[:, 0], 'lat': lonlat_field[:, 1], 'time': time_field}
-                    pset.add(pdata)
-            else:
-                pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(args.compute_mode).lower()], lon=np.random.rand(Nparticle, 1) * (-a) + (a/2.0), lat=np.random.rand(Nparticle, 1) * (-b) + (b/2.0), depth=np.random.rand(Nparticle, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-        else:
-            if repeatdtFlag:
-                pset = ParticleSet(fieldset=fieldset, pclass=ptype[(args.compute_mode).lower()], lon=np.random.rand(start_N_particles, 1) * (-a) + (a/2.0), lat=np.random.rand(start_N_particles, 1) * (-b) + (b/2.0), depth=np.random.rand(start_N_particles, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart, repeatdt=delta(minutes=repeatRateMinutes))
-                if pset_type != 'nodes':
-                    psetA = ParticleSet(fieldset=fieldset, pclass=ptype[(args.compute_mode).lower()], lon=np.random.rand(int(addParticleN), 1) * (-a) + (a/2.0), lat=np.random.rand(int(addParticleN), 1) * (-b) + (b/2.0), depth=np.random.rand(int(addParticleN), 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-                    pset.add(psetA)
-                else:
-                    lonlat_field = np.random.rand(int(addParticleN), pt_ndims)
-                    marr = np.array([a, b, c/2]) if use_3D else np.array([a, b])
-                    lonlat_field *= marr
-                    lonlat_field[:, 0] = -lonlat_field[:, 0] + (a / 2.0)
-                    lonlat_field[:, 1] = -lonlat_field[:, 1] + (b / 2.0)
-                    if use_3D:
-                        lonlat_field[:, 2] = -lonlat_field[:, 2] + (c * 0.75)
-                    time_field = np.ones((int(addParticleN), 1), dtype=np.float64) * simStart
-                    # pdata = np.concatenate( (lonlat_field, time_field), axis=1 )
-                    pdata = {'lon': lonlat_field[:, 0], 'lat': lonlat_field[:, 1], 'time': time_field}
-                    pset.add(pdata)
-            else:
-                pset = ParticleSet(fieldset=fieldset, pclass=ptype[(args.compute_mode).lower()], lon=np.random.rand(Nparticle, 1) * (-a) + (a/2.0), lat=np.random.rand(Nparticle, 1) * (-b) + (b/2.0), depth=np.random.rand(Nparticle, 1) * (-c/2) + (c * 0.75) if use_3D else None, time=simStart)
-
-    # ======== ======== End of FieldSet construction ======== ======== #
-    output_file = None
-    out_fname = "benchmark_perlin"
-    if args.write_out:
-        if MPI and (MPI.COMM_WORLD.Get_size()>1):
-            out_fname += "_MPI" + "_n{}".format(MPI.COMM_WORLD.Get_size())
-            pfname += "_MPI" + "_n{}".format(MPI.COMM_WORLD.Get_size())
-        else:
-            out_fname += "_noMPI"
-            pfname += "_noMPI"
-        if periodicFlag:
-            out_fname += "_p"
-            pfname += '_p'
-        out_fname += "_n"+str(Nparticle)
-        pfname += "_n"+str(Nparticle)
-        # if time_in_years != 1:
-        #     out_fname += '_%dy' % (time_in_years, )
-        #     pfname += '_%dy' % (time_in_years, )
-        out_fname += '_%dd' % (time_in_days, )
-        pfname += '_%dd' % (time_in_days, )
         if use_3D:
-            out_fname += "_3D"
-            pfname += "_3D"
-        if backwardSimulation:
-            out_fname += "_bwd"
-            pfname += "_bwd"
+            print("sim-start: {}".format(simStart))
+            lons, lats, depths = sample_particles((-a / 2.0, a / 2.0), (-b / 2.0, b / 2.0), depth_range=(.0, c),
+                                                  res=sres if sres > 0 else None, rsampler_str=sample_mode,
+                                                  nparticle=target_N)
+            print("array sizes - lons: {}, lats: {}, depths: {}".format(len(lons), len(lats), len(depths)))
+            pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, depth=depths, time=simStart)
         else:
-            out_fname += "_fwd"
-            pfname += "_fwd"
-        if repeatdtFlag:
-            out_fname += "_add"
-            pfname += "_add"
-        if agingParticles:
-            out_fname += "_age"
-            pfname += "_age"
-        if with_GC:
-            out_fname += "_wGC"
-            pfname += "_wGC"
+            lons, lats, _ = sample_particles((-a / 2.0, a / 2.0), (-b / 2.0, b / 2.0), res=sres if sres > 0 else None,
+                                             rsampler_str=sample_mode, nparticle=target_N)
+            pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
+        print("Sampling concluded.")
+
+        step = 1.0 / gres
+        zstep = gres * 10.0
+        xsteps = int(np.floor(a * gres))
+        # xsteps = int(np.ceil(a * gres))
+        ysteps = int(np.floor(b * gres))
+        # ysteps = int(np.ceil(b * gres))
+        zsteps = int(np.floor(c * (1.0 / (gres * 10.0))))
+        # zsteps = int(np.ceil(c * gres))
+        if DBG_MSG:
+            print("=========================================================")
+            print("step: gres={}, value={}".format(gres, step))
+            print("zstep: gres={}, value={}".format(gres, zstep))
+            print("xsteps: a={}, gres={}, value={}".format(a, gres, xsteps))
+            print("xsteps: b={}, gres={}, value={}".format(b, gres, ysteps))
+            print("xsteps: c={}, gres={}, value={}".format(c, gres, zsteps))
+            print("=========================================================")
+        # =================================================== #
+        # ==== Writing simulation parameters to CSV file ==== #
+        # =================================================== #
+        csv_file = os.path.splitext(filename)[0] + ".csv"
+        with open(os.path.join(odir, csv_file), 'w') as f:
+            header_string = ""
+            value_string = ""
+            header_string += "(t) sim time [d], (dt) time integral [min], (out_dt) output time integral [min],"
+            header_string += "(N) number particles, (sres) sample resolution, (gres) (projected) grid resolution,"
+            header_string += "(interp) interpolation function, (smode) sample mode"
+            header_string += "\n"
+            value_string += "{:5.5f}, {:7.7f}, {:7.7f},".format(time_in_days, dt_minutes, outdt_minutes)
+            value_string += "{}, {}, {},".format(len(pset), sres, gres)
+            value_string += "{}, {}".format(interp_mode, sample_mode)
+            f.write(header_string)
+            f.write(value_string)
+
+        # ======== ======== End of FieldSet construction ======== ======== #
+        output_file = None
+        if args.write_out:
+            output_file = pset.ParticleFile(name=os.path.join(odir, out_fname+".nc"), outputdt=datetime.timedelta(minutes=outdt_minutes))
+
+        delete_func = RenewParticle
+        if args.delete_particle:
+            delete_func = DeleteParticle
+        postProcessFuncs = []
+
+        if MPI:
+            mpi_comm = MPI.COMM_WORLD
+            mpi_rank = mpi_comm.Get_rank()
+            if mpi_rank==0:
+                starttime = ostime.process_time()
         else:
-            out_fname += "_woGC"
-            pfname += "_woGC"
-        output_file = pset.ParticleFile(name=os.path.join(odir, out_fname+".nc"), outputdt=delta(hours=24))
-    imageFileName = pfname + pfext
-
-    delete_func = RenewParticle
-    if args.delete_particle:
-        delete_func = DeleteParticle
-    postProcessFuncs = None
-    callbackdt = None
-    if with_GC:
-        postProcessFuncs = [perIterGC, ]
-        callbackdt = delta(hours=12)
-
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        mpi_rank = mpi_comm.Get_rank()
-        if mpi_rank==0:
             starttime = ostime.process_time()
-    else:
-        starttime = ostime.process_time()
-    advect_K = AdvectionRK4
-    if use_3D:
-        advect_K = AdvectionRK4_3D
-    kernels = pset.Kernel(advect_K ,delete_cfiles=True)
-    if use_3D:
-        kernels += pset.Kernel(reflect_top_bottom, delete_cfiles=True)
-    kernels += pset.Kernel(periodicBC, delete_cfiles=True)
-    if agingParticles:
+
+        kernelfunc = AdvectionEE
+        if interp_mode == 'rk4':
+            kernelfunc = AdvectionRK4
+            if use_3D:
+                advect_K = AdvectionRK4_3D
+        elif interp_mode == 'rk45':
+            kernelfunc = AdvectionRK45
+            if use_3D:
+                advect_K = AdvectionRK4_3D
+        elif interp_mode == 'em':
+            kernelfunc = AdvectionDiffusionEM
+        elif interp_mode == 'm1':
+            kernelfunc = AdvectionDiffusionM1
+        kernels = pset.Kernel(kernelfunc ,delete_cfiles=True)
+
+        if use_3D:
+            kernels += pset.Kernel(reflect_top_bottom, delete_cfiles=True)
         kernels += pset.Kernel(initialize, delete_cfiles=True)
         kernels += pset.Kernel(Age, delete_cfiles=True)
-    if backwardSimulation:
-        # ==== backward simulation ==== #
-        if args.animate:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
-        else:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=-dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
-    else:
-        # ==== forward simulation ==== #
-        if args.animate:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12), moviedt=delta(hours=6), movie_background_field=fieldset.U)
-        else:
-            pset.execute(kernels, runtime=delta(days=time_in_days), dt=delta(minutes=dt_minutes), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=delta(hours=12))
+        kernels += pset.Kernel(periodicBC, delete_cfiles=True)
 
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        mpi_rank = mpi_comm.Get_rank()
-        if mpi_rank==0:
+        postProcessFuncs.append(perIterGC)
+        pset.execute(kernels, runtime=datetime.timedelta(days=time_in_days).total_seconds(), dt=datetime.timedelta(minutes=dt_minutes).total_seconds(), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=datetime.timedelta(minutes=outdt_minutes).total_seconds())
+
+        if MPI:
+            mpi_comm = MPI.COMM_WORLD
+            mpi_rank = mpi_comm.Get_rank()
+            if mpi_rank==0:
+                endtime = ostime.process_time()
+        else:
             endtime = ostime.process_time()
-    else:
-        endtime = ostime.process_time()
 
-    if args.write_out:
-        output_file.close()
+        if args.write_out:
+            output_file.close()
 
-    if MPI:
-        mpi_comm = MPI.COMM_WORLD
-        # mpi_comm.Barrier()
-        Npart = Nparticle
-        Npart = mpi_comm.reduce(Npart, op=MPI.SUM, root=0)
-        if mpi_comm.Get_rank() == 0:
-            sys.stdout.write("final # particles: {}\n".format( Npart ))
-            sys.stdout.write("Time of pset.execute(): {} sec.\n".format(endtime-starttime))
+        # if MPI:
+        #     mpi_comm = MPI.COMM_WORLD
+        #     # mpi_comm.Barrier()
+        #     Npart = Nparticle
+        #     Npart = mpi_comm.reduce(Npart, op=MPI.SUM, root=0)
+        #     if mpi_comm.Get_rank() == 0:
+        #         sys.stdout.write("final # particles: {}\n".format( Npart ))
+        #         sys.stdout.write("Time of pset.execute(): {} sec.\n".format(endtime-starttime))
+        # else:
+        #     Npart = Nparticle
+        #     sys.stdout.write("final # particles: {}\n".format( Npart ))
+        #     sys.stdout.write("Time of pset.execute(): {} sec.\n".format(endtime - starttime))
+
+        del kernels
+        del output_file
+        del pset
+        del fieldset
+
+    # ================================================================================================================ #
+    #          P O S T - P R O C E S S I N G
+    # ================================================================================================================ #
+    step = 1.0/gres
+    zstep = gres*50.0
+    xsteps = int(np.floor(a * gres))
+    ysteps = int(np.floor(b * gres))
+    zsteps = int(np.floor(c * (1.0/(gres*50.0))))
+
+    data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
+    N = data_xarray['lon'].data.shape[0]
+    tN = data_xarray['lon'].data.shape[1]
+    if DBG_MSG:
+        print("N: {}, t_N: {}".format(N, tN))
+    np.set_printoptions(linewidth=160)
+    ns_per_sec = np.timedelta64(1, 's')  # nanoseconds in an sec
+    if DBG_MSG:
+        print("ns_per_sec = {}".format((ns_per_sec/np.timedelta64(1, 'ns')).astype(np.float64)))
+    sec_per_day = 86400.0
+    ctime_array = data_xarray['time'].data
+    if DBG_MSG:
+        print("time info from file before baselining: shape = {} type = {} range = ({}, {})".format(ctime_array.shape, type(ctime_array[0 ,0]), ctime_array[0].min(), ctime_array[0].max()))
+    timebase = ctime_array[:, 0]
+    dtime_array = np.transpose(ctime_array.transpose() - timebase)
+    if DBG_MSG:
+        print("time info from file after baselining: shape = {} type = {} range = ({}, {})".format(dtime_array.shape, type(dtime_array[0 ,0]), dtime_array[0].min(), dtime_array[0].max()))
+
+    fX = data_xarray['lon'].data
+    fY = data_xarray['lat'].data
+    fZ = None
+    sample3D = False
+    if 'depth' in data_xarray.keys():
+        fZ = data_xarray['depth'].data
+        sample3D = True
+    elif 'z' in data_xarray.keys():
+        fZ = data_xarray['z'].data
+        sample3D = True
+    max_times = np.nanmax(dtime_array, axis=0)
+    timebase_s = max_times[0]
+    fT = dtime_array - timebase_s
+    fT = convert_timearray(fT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fT")
+    fA = data_xarray['age'].data
+    fAd = data_xarray['age_d'].data
+    if DBG_MSG:
+        print("original fA.range and fA.dtype (before conversion): ({}, {}) \t {}".format(fA[0].min(), fA[0].max(), fA.dtype))
+    if not isinstance(fA[0,0], np.float32) and not isinstance(fA[0,0], np.float64):
+        fA = fA - timebase
+    fA = convert_timearray(fA, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="fA")
+    global_fT = max_times - max_times[0]
+    global_fT = convert_timearray(global_fT, outdt_minutes*60, ns_per_sec, debug=DBG_MSG, array_name="global_fT")
+    fT_dt = global_fT[1] - global_fT[0]
+    reverse_time = (np.all(global_fT <= np.finfo(global_fT.dtype).eps) or (np.max(fT[0]) - np.min(fT[0])) < 0) and (fT_dt < 0)
+    fT_ext = (global_fT.min(), global_fT.max())
+    print("|t_sample|: {}; dt = {}; [T] = {}".format(global_fT.shape, fT_dt, fT_ext))
+
+    # ==== time interpolation ==== #
+    ti_min = 0
+    ti_max = global_fT.shape[0]-1
+    pT_max = max(global_fT[ti_max], global_fT[ti_min])
+    pT_min = min(global_fT[ti_max], global_fT[ti_min])
+    idt = math.copysign(1.0 * 86400.0, fT_dt)
+    iT = global_fT
+    cap_min = global_fT[ti_min]
+    cap_max = global_fT[ti_max]
+    iT_max = np.max(global_fT)
+    iT_min = np.min(global_fT)
+    tsteps = int(math.floor((fT_ext[1]-fT_ext[0])/fT_dt))
+    if interpolate_particles:
+        tsteps = int(math.floor((pT_max-pT_min)/idt)) if not reverse_time else int(math.floor((pT_min-pT_max)/idt))
+        tsteps = abs(tsteps)
+        iT = np.linspace(pT_min, pT_max, tsteps, dtype=np.float64) if not reverse_time else np.linspace(pT_max, pT_min, tsteps, dtype=np.float64)
+        ti_min = max(np.min(np.nonzero(iT >= cap_min)[0])-1, 0) if not reverse_time else max(np.min(np.nonzero(iT <= cap_min)[0])-1, 0)
+        ti_max = min(np.max(np.nonzero(iT <= cap_max)[0])+1, iT.shape[0]-1) if not reverse_time else min(np.max(np.nonzero(iT >= cap_max)[0])+1, iT.shape[0]-1)
+        iT_max = np.max(iT)
+        iT_min = np.min(iT)
+        print("New time field: t_min = {}, t_max = {}, dt = {}, |T| = {}, ti_min_new = {}, ti_max_new = {}".format(iT_min, iT_max, idt, iT.shape[0], ti_min, ti_max))
+    # ==== end time interpolation ==== #
+
+    if integrate_particles:
+        pcount = None
+        if sample3D:
+            pcount = np.zeros((zsteps, ysteps, xsteps), dtype=np.int32)
+        else:
+            pcount = np.zeros((ysteps, xsteps), dtype=np.int32)
+        pcount_minmax = [0., 0.]
+        pcount_statistics = [0., 0.]
+        pcount_file, pcount_file_ds = None, None
+        if not interpolate_particles:
+            pcount_file = h5py.File(os.path.join(odir, "particlecount.h5"), "w")
+            if sample3D:
+                pcount_file_ds = pcount_file.create_dataset("pcount",
+                                                            shape=(1, pcount.shape[0], pcount.shape[1], pcount.shape[2]),
+                                                            dtype=pcount.dtype,
+                                                            maxshape=(fT.shape[1], pcount.shape[0], pcount.shape[1], pcount.shape[2]),
+                                                            compression="gzip", compression_opts=4)
+            else:
+                pcounts_file_ds = pcount_file.create_dataset("pcount",
+                                                              shape=(1, pcount.shape[0], pcount.shape[1]),
+                                                              dtype=pcount.dtype,
+                                                              maxshape=(fT.shape[1], pcount.shape[0], pcount.shape[1]),
+                                                              compression="gzip", compression_opts=4)
+            pcount_file_ds.attrs['unit'] = "count (scalar)"
+            pcount_file_ds.attrs['name'] = 'particle_count'
+
+        rho = None
+        if sample3D:
+            rho = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+        else:
+            rho = np.zeros((ysteps, xsteps), dtype=np.float32)
+        rho_minmax = [0., 0.]
+        rho_statistics = [0., 0.]
+        rho_file, rho_file_ds = None, None
+        if not interpolate_particles:
+            rho_file = h5py.File(os.path.join(odir, "density.h5"), "w")
+            if sample3D:
+                rho_file_ds = rho_file.create_dataset("density",
+                                                      shape=(1, rho.shape[0], rho.shape[1], rho.shape[2]),
+                                                      dtype=rho.dtype,
+                                                      maxshape=(fT.shape[1], rho.shape[0], rho.shape[1], rho.shape[2]),
+                                                      compression="gzip", compression_opts=4)
+            else:
+                rho_file_ds = rho_file.create_dataset("density",
+                                                      shape=(1, rho.shape[0], rho.shape[1]),
+                                                      dtype=rho.dtype,
+                                                      maxshape=(fT.shape[1], rho.shape[0], rho.shape[1]),
+                                                      compression="gzip", compression_opts=4)
+            rho_file_ds.attrs['unit'] = "pts / arc_deg^2"
+            rho_file_ds.attrs['name'] = 'density'
+
+        rel_rho = None
+        if sample3D:
+            rel_rho = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+        else:
+            rel_rho = np.zeros((ysteps, xsteps), dtype=np.float32)
+        rel_rho_minmax = [0., 0.]
+        rel_rho_statistics = [0., 0.]
+        rel_rho_file, rel_rho_file_ds = None, None
+        if not interpolate_particles:
+            rel_rho_file = h5py.File(os.path.join(odir, "rel_density.h5"), "w")
+            if sample3D:
+                rel_rho_file_ds = rel_rho_file.create_dataset("rel_density",
+                                                              shape=(1, rel_rho.shape[0], rel_rho.shape[1], rel_rho.shape[2]),
+                                                              dtype=rel_rho.dtype,
+                                                              maxshape=(fT.shape[1], rel_rho.shape[0], rel_rho.shape[1], rel_rho.shape[2]),
+                                                              compression="gzip", compression_opts=4)
+            else:
+                rel_rho_file_ds = rel_rho_file.create_dataset("rel_density",
+                                                              shape=(1, rel_rho.shape[0], rel_rho.shape[1]),
+                                                              dtype=rel_rho.dtype,
+                                                              maxshape=(fT.shape[1], rel_rho.shape[0], rel_rho.shape[1]),
+                                                              compression="gzip", compression_opts=4)
+            rel_rho_file_ds.attrs['unit'] = "pts_percentage / arc_deg^2"
+            rel_rho_file_ds.attrs['name'] = 'relative_density'
+
+        lifetime = None
+        if sample3D:
+            lifetime = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+        else:
+            lifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
+        lifetime_minmax = [0., 0.]
+        lifetime_statistics = [0., 0.]
+        lifetime_file, lifetime_file_ds = None, None
+        if not interpolate_particles:
+            lifetime_file = h5py.File(os.path.join(odir, "lifetime.h5"), "w")
+            if sample3D:
+                lifetime_file_ds = lifetime_file.create_dataset("lifetime",
+                                                                shape=(1, lifetime.shape[0], lifetime.shape[1], lifetime.shape[2]),
+                                                                dtype=lifetime.dtype,
+                                                                maxshape=(fT.shape[1], lifetime.shape[0], lifetime.shape[1], lifetime.shape[2]),
+                                                                compression="gzip", compression_opts=4)
+            else:
+                lifetime_file_ds = lifetime_file.create_dataset("lifetime",
+                                                                shape=(1, lifetime.shape[0], lifetime.shape[1]),
+                                                                dtype=lifetime.dtype,
+                                                                maxshape=(fT.shape[1], lifetime.shape[0], lifetime.shape[1]),
+                                                                compression="gzip", compression_opts=4)
+            lifetime_file_ds.attrs['unit'] = "avg. lifetime"
+            lifetime_file_ds.attrs['name'] = 'lifetime'
+
+        A = float(gres**2)
+        total_items = fT.shape[0] * fT.shape[1]
+        for ti in range(ti_min, ti_max+1):
+            if interpolate_particles:
+                # ==== ==== create files ==== ==== #
+                pcount_minmax = [0., 0.]
+                pcount_statistics = [0., 0.]
+                pcount_filename = "particlecount_d%d.h5" % (ti, )
+                pcount_file = h5py.File(os.path.join(odir, pcount_filename), "w")
+                if sample3D:
+                    pcount_file_ds = pcount_file.create_dataset("pcount",
+                                                                shape=(1, pcount.shape[0], pcount.shape[1], pcount.shape[2]),
+                                                                dtype=pcount.dtype,
+                                                                maxshape=(1, pcount.shape[0], pcount.shape[1], pcount.shape[2]),
+                                                                compression="gzip", compression_opts=4)
+                else:
+                    pcounts_file_ds = pcount_file.create_dataset("pcount",
+                                                                 shape=(1, pcount.shape[0], pcount.shape[1]),
+                                                                 dtype=pcount.dtype,
+                                                                 maxshape=(1, pcount.shape[0], pcount.shape[1]),
+                                                                 compression="gzip", compression_opts=4)
+                pcount_file_ds.attrs['unit'] = "count (scalar)"
+                pcount_file_ds.attrs['name'] = 'particle_count'
+
+                rho_minmax = [0., 0.]
+                rho_statistics = [0., 0.]
+                rho_filename = "density_d%d.h5" % (ti, )
+                rho_file = h5py.File(os.path.join(odir, rho_filename), "w")
+                if sample3D:
+                    rho_file_ds = rho_file.create_dataset("density",
+                                                          shape=(1, rho.shape[0], rho.shape[1], rho.shape[2]),
+                                                          dtype=rho.dtype,
+                                                          maxshape=(1, rho.shape[0], rho.shape[1], rho.shape[2]),
+                                                          compression="gzip", compression_opts=4)
+                else:
+                    rho_file_ds = rho_file.create_dataset("density",
+                                                          shape=(1, rho.shape[0], rho.shape[1]),
+                                                          dtype=rho.dtype,
+                                                          maxshape=(1, rho.shape[0], rho.shape[1]),
+                                                          compression="gzip", compression_opts=4)
+                rho_file_ds.attrs['unit'] = "pts / arc_deg^2"
+                rho_file_ds.attrs['name'] = 'density'
+
+                rel_rho_minmax = [0., 0.]
+                rel_rho_statistics = [0., 0.]
+                rel_rho_filename = "rel_density_d%d.h5" % (ti, )
+                rel_rho_file = h5py.File(os.path.join(odir, rel_rho_filename), "w")
+                if sample3D:
+                    rel_rho_file_ds = rel_rho_file.create_dataset("rel_density",
+                                                                  shape=(1, rel_rho.shape[0], rel_rho.shape[1], rel_rho.shape[2]),
+                                                                  dtype=rel_rho.dtype,
+                                                                  maxshape=(1, rel_rho.shape[0], rel_rho.shape[1], rel_rho.shape[2]),
+                                                                  compression="gzip", compression_opts=4)
+                else:
+                    rel_rho_file_ds = rel_rho_file.create_dataset("rel_density",
+                                                                  shape=(1, rel_rho.shape[0], rel_rho.shape[1]),
+                                                                  dtype=rel_rho.dtype,
+                                                                  maxshape=(1, rel_rho.shape[0], rel_rho.shape[1]),
+                                                                  compression="gzip", compression_opts=4)
+                rel_rho_file_ds.attrs['unit'] = "pts_percentage / arc_deg^2"
+                rel_rho_file_ds.attrs['name'] = 'relative_density'
+
+                lifetime_minmax = [0., 0.]
+                lifetime_statistics = [0., 0.]
+                lifetime_filename = "lifetime_d%d.h5" % (ti, )
+                lifetime_file = h5py.File(os.path.join(odir, lifetime_filename), "w")
+                if sample3D:
+                    lifetime_file_ds = lifetime_file.create_dataset("lifetime",
+                                                                    shape=(1, lifetime.shape[0], lifetime.shape[1], lifetime.shape[2]),
+                                                                    dtype=lifetime.dtype,
+                                                                    maxshape=(1, lifetime.shape[0], lifetime.shape[1],
+                                                                    lifetime.shape[2]),
+                                                                    compression="gzip", compression_opts=4)
+                else:
+                    lifetime_file_ds = lifetime_file.create_dataset("lifetime",
+                                                                    shape=(1, lifetime.shape[0], lifetime.shape[1]),
+                                                                    dtype=lifetime.dtype,
+                                                                    maxshape=(1, lifetime.shape[0], lifetime.shape[1]),
+                                                                    compression="gzip", compression_opts=4)
+                lifetime_file_ds.attrs['unit'] = "avg. lifetime"
+                lifetime_file_ds.attrs['name'] = 'lifetime'
+                # ==== === files created. === ==== #
+
+            if sample3D:
+                pcount[:, :, :] = 0
+                rho[:, :, :] = 0
+                rel_rho[:, :, :] = 0
+                lifetime[:, :, :] = 0
+                tlifetime = np.zeros((zsteps, ysteps, xsteps), dtype=np.float32)
+            else:
+                pcount[:, :] = 0
+                rho[:, :] = 0
+                rel_rho[:, :] = 0
+                lifetime[:, :] = 0
+                tlifetime = np.zeros((ysteps, xsteps), dtype=np.float32)
+
+            x_in, y_in, z_in = None, None, None
+            nonnan_x, nonnan_y, nonnan_z = None, None, None
+            if interpolate_particles:
+                tx0 = iT_min + float(ti) * idt if not reverse_time else iT_max + float(ti) * idt
+                tx1 = iT_min + float(min(ti + 1, iT.shape[0]-1)) * idt
+                tx1 = (iT_max + float(min(ti + 1, iT.shape[0] - 1)) * idt) if reverse_time else tx1
+                if DBG_MSG:  #
+                    print("tx0: {}, tx1: {}".format(tx0, tx1))
+                p_ti0 = time_index_value(tx0, global_fT)
+                p_tt = time_partion_value(tx0, global_fT)
+                p_ti1 = time_index_value(tx1, global_fT)
+                if DBG_MSG:  #
+                    print("p_ti0: {}, p_ti1: {}, p_tt: {}".format(p_ti0, p_ti1, p_tt))
+                x_in = np.array((1.0-p_tt) * fX[:, p_ti0] + p_tt * fX[:, p_ti1])
+                nonnan_x = ~np.isnan(x_in)
+                y_in = np.array((1.0-p_tt) * fY[:, p_ti0] + p_tt * fY[:, p_ti1])
+                nonnan_y = ~np.isnan(y_in)
+                if sample3D:
+                    z_in = np.array((1.0-p_tt) * fZ[:, p_ti0] + p_tt * fZ[:, p_ti1])
+                    nonnan_z = ~np.isnan(z_in)
+            else:
+                x_in = np.array(fX[:, ti])
+                nonnan_x = ~np.isnan(x_in)
+                y_in = np.array(fY[:, ti])
+                nonnan_y = ~np.isnan(y_in)
+                if sample3D:
+                    z_in = np.array(fZ[:, ti])
+                    nonnan_z = ~np.isnan(z_in)
+
+            xpts, ypts, zpts = (None, None, None)
+            if sample3D:
+                x_in = x_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
+                y_in = y_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
+                z_in = z_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
+                xpts = (np.floor(x_in+(a/2.0))*gres).astype(np.int32).flatten()
+                ypts = (np.floor(y_in+(b/2.0))*gres).astype(np.int32).flatten()
+                zpts = (np.floor(z_in / gres)).astype(np.int32).flatten()
+                assert xpts.shape[0] == ypts.shape[0], "Dimensions of xpts (={}) does not match ypts(={}).".format(xpts.shape[0], ypts.shape[0])
+                assert xpts.shape[0] == zpts.shape[0], "Dimensions of xpts (={}) does not match zpts(={}).".format(xpts.shape[0], zpts.shape[0])
+                xcondition = np.logical_and((xpts >= 0), (xpts < (xsteps - 1)))
+                ycondition = np.logical_and((ypts >= 0), (ypts < (ysteps - 1)))
+                zcondition = np.logical_and((zpts >= 0), (zpts < (zsteps - 1)))
+                xpts = xpts[np.logical_and(np.logical_and(xcondition, ycondition), zcondition)]
+                ypts = ypts[np.logical_and(np.logical_and(xcondition, ycondition), zcondition)]
+                zpts = zpts[np.logical_and(np.logical_and(xcondition, ycondition), zcondition)]
+            else:
+                x_in = x_in[np.logical_and(nonnan_x, nonnan_y)]
+                y_in = y_in[np.logical_and(nonnan_x, nonnan_y)]
+                xpts = (np.floor(x_in+(a/2.0))*gres).astype(np.int32).flatten()
+                ypts = (np.floor(y_in+(b/2.0))*gres).astype(np.int32).flatten()
+                assert xpts.shape[0] == ypts.shape[0], "Dimensions of xpts (={}) does not match ypts(={}).".format(xpts.shape[0], ypts.shape[0])
+                xcondition = np.logical_and((xpts >= 0), (xpts < (xsteps - 1)))
+                ycondition = np.logical_and((ypts >= 0), (ypts < (ysteps - 1)))
+                xpts = xpts[np.logical_and(xcondition, ycondition)]
+                ypts = ypts[np.logical_and(xcondition, ycondition)]
+
+            if ti == 0:
+                print("xpts: {}".format(xpts))
+                print("ypts: {}".format(ypts))
+                if sample3D:
+                    print("zpts: {}".format(zpts))
+            for pi in range(xpts.shape[0]):
+                try:
+                    if sample3D:
+                        pcount[zpts[pi], ypts[pi], xpts[pi]] += 1
+                        tlifetime[zpts[pi], ypts[pi], xpts[pi]] += fA[pi, ti]
+                    else:
+                        pcount[ypts[pi], xpts[pi]] += 1
+                        tlifetime[ypts[pi], xpts[pi]] += fA[pi, ti]
+                except (IndexError, ) as error_msg:
+                    # we don't abort here cause the brownian-motion wiggle of AvectionRK4EulerMarujama always edges on machine precision, which can np.floor(..) make go over-size
+                    if sample3D:
+                        print("\nError trying to index point ({}, {}, {}) with indices ({}, {}, {})".format(fX[pi, ti], fY[pi, ti], fZ[pi, ti],
+                                                                                                    xpts[pi], ypts[pi], zpts[pi]))
+                    else:
+                        print("\nError trying to index point ({}, {}) with indices ({}, {})".format(fX[pi, ti], fY[pi, ti], xpts[pi], ypts[pi]))
+                if (pi % 100) == 0:
+                    current_item = (ti*fT.shape[0]) + pi
+                    workdone = current_item / total_items
+                    print("\rProgress: [{0:50s}] {1:.1f}%".format('#' * int(workdone * 50), workdone * 100), end="", flush=True)
+            rho = pcount.astype(np.float32) / A
+            lifetime[:, :] = np.where(pcount > 0, tlifetime / pcount, 0)
+            lifetime = np.round(lifetime / sec_per_day, decimals=3)
+            rel_rho = rho / float(N)
+
+            pcount_minmax = [min(pcount_minmax[0], pcount.min()), max(pcount_minmax[1], pcount.max())]
+            pcount_statistics[0] += pcount.mean()
+            pcount_statistics[1] += pcount.std()
+            rho_minmax = [min(rho_minmax[0], rho.min()), max(rho_minmax[1], rho.max())]
+            rho_statistics[0] += rho.mean()
+            rho_statistics[1] += rho.std()
+            rel_rho_minmax = [min(rel_rho_minmax[0], rel_rho.min()), max(rel_rho_minmax[1], rel_rho.max())]
+            rel_rho_statistics[0] += rel_rho.mean()
+            rel_rho_statistics[1] += rel_rho.std()
+            lifetime_minmax = [min(lifetime_minmax[0], lifetime.min()), max(lifetime_minmax[1], lifetime.max())]
+            lifetime_statistics[0] += lifetime.mean()
+            lifetime_statistics[1] += lifetime.std()
+
+            if not interpolate_particles:
+                pcount_file_ds.resize((ti+1), axis=0)
+                rho_file_ds.resize((ti+1), axis=0)
+                rel_rho_file_ds.resize((ti+1), axis=0)
+                lifetime_file_ds.resize((ti+1), axis=0)
+                if sample3D:
+                    pcount_file_ds[ti, :, :, :] = pcount
+                    rho_file_ds[ti, :, :, :] = rho
+                    rel_rho_file_ds[ti, :, :, :] = rel_rho
+                    lifetime_file_ds[ti, :, :, :] = lifetime
+                else:
+                    pcount_file_ds[ti, :, :] = pcount
+                    rho_file_ds[ti, :, :] = rho
+                    rel_rho_file_ds[ti, :, :] = rel_rho
+                    lifetime_file_ds[ti, :, :] = lifetime
+            else:
+                if sample3D:
+                    pcount_file_ds[0, :, :, :] = pcount
+                    rho_file_ds[0, :, :, :] = rho
+                    rel_rho_file_ds[0, :, :, :] = rel_rho
+                    lifetime_file_ds[0, :, :, :] = lifetime
+                else:
+                    pcount_file_ds[0, :, :] = pcount
+                    rho_file_ds[0, :, :] = rho
+                    rel_rho_file_ds[0, :, :] = rel_rho
+                    lifetime_file_ds[0, :, :] = lifetime
+
+            if interpolate_particles:
+                pcount_file_ds.attrs['min'] = pcount_minmax[0]
+                pcount_file_ds.attrs['max'] = pcount_minmax[1]
+                pcount_file_ds.attrs['mean'] = pcount_statistics[0]
+                pcount_file_ds.attrs['std'] = pcount_statistics[1]
+                pcount_file.close()
+                rho_file_ds.attrs['min'] = rho_minmax[0]
+                rho_file_ds.attrs['max'] = rho_minmax[1]
+                rho_file_ds.attrs['mean'] = rho_statistics[0]
+                rho_file_ds.attrs['std'] = rho_statistics[1]
+                rho_file.close()
+                rel_rho_file_ds.attrs['min'] = rel_rho_minmax[0]
+                rel_rho_file_ds.attrs['max'] = rel_rho_minmax[1]
+                rel_rho_file_ds.attrs['mean'] = rel_rho_statistics[0]
+                rel_rho_file_ds.attrs['std'] = rel_rho_statistics[1]
+                rel_rho_file.close()
+                lifetime_file_ds.attrs['min'] = lifetime_minmax[0]
+                lifetime_file_ds.attrs['max'] = lifetime_minmax[1]
+                lifetime_file_ds.attrs['mean'] = lifetime_statistics[0]
+                lifetime_file_ds.attrs['std'] = lifetime_statistics[1]
+                lifetime_file.close()
+
+            del tlifetime
+            del xpts
+            del ypts
+        print("\nField Interpolation done.")
+        data_xarray.close()
+
+        if not interpolate_particles:
+            print("Particle Count info: shape = {} type = {} range = {}".format(pcount_file_ds.shape, pcount_file_ds.dtype, pcount_minmax))
+            print("Density info: shape = {} type = {} range = ({}, {})".format(rho_file_ds.shape, rho_file_ds.dtype, rho.min(), rho.max()))
+            print("Lifetime info: shape = {} type = {} range = ({}, {})".format(lifetime_file_ds.shape, lifetime_file_ds.dtype, lifetime.min(), lifetime.max()))
+
+            pcount_file_ds.attrs['min'] = pcount_minmax[0]
+            pcount_file_ds.attrs['max'] = pcount_minmax[1]
+            pcount_file_ds.attrs['mean'] = pcount_statistics[0] / float(fT.shape[1])
+            pcount_file_ds.attrs['std'] = pcount_statistics[1] / float(fT.shape[1])
+            pcount_file.close()
+
+            rho_file_ds.attrs['min'] = rho_minmax[0]
+            rho_file_ds.attrs['max'] = rho_minmax[1]
+            rho_file_ds.attrs['mean'] = rho_statistics[0] / float(fT.shape[1])
+            rho_file_ds.attrs['std'] = rho_statistics[1] / float(fT.shape[1])
+            rho_file.close()
+
+            rel_rho_file_ds.attrs['min'] = rel_rho_minmax[0]
+            rel_rho_file_ds.attrs['max'] = rel_rho_minmax[1]
+            rel_rho_file_ds.attrs['mean'] = rel_rho_statistics[0] / float(fT.shape[1])
+            rel_rho_file_ds.attrs['std'] = rel_rho_statistics[1] / float(fT.shape[1])
+            rel_rho_file.close()
+
+            lifetime_file_ds.attrs['min'] = lifetime_minmax[0]
+            lifetime_file_ds.attrs['max'] = lifetime_minmax[1]
+            lifetime_file_ds.attrs['mean'] = lifetime_statistics[0] / float(fT.shape[1])
+            lifetime_file_ds.attrs['std'] = lifetime_statistics[1] / float(fT.shape[1])
+            lifetime_file.close()
+
+        n_valid_pts = fX.shape[0]
+        print("Number valid particles: {} (of total {})".format(n_valid_pts, fX.shape[0]))
+        particle_file = h5py.File(os.path.join(odir, "particles.h5"), "w")
+        px_ds = particle_file.create_dataset("p_x", data=fX, compression="gzip", compression_opts=4)
+        px_ds.attrs['unit'] = "arc degree"
+        px_ds.attrs['name'] = 'longitude'
+        px_ds.attrs['min'] = fX.min()
+        px_ds.attrs['max'] = fX.max()
+        py_ds = particle_file.create_dataset("p_y", data=fY, compression="gzip", compression_opts=4)
+        py_ds.attrs['unit'] = "arc degree"
+        py_ds.attrs['name'] = 'latitude'
+        py_ds.attrs['min'] = fY.min()
+        py_ds.attrs['max'] = fY.max()
+        pz_ds = None
+        if fZ is not None:
+            pz_ds = particle_file.create_dataset("p_z", data=fZ, compression="gzip", compression_opts=4)
+            pz_ds.attrs['unit'] = "metres"
+            pz_ds.attrs['name'] = 'depth'
+            pz_ds.attrs['min'] = fZ.min()
+            pz_ds.attrs['max'] = fZ.max()
+        pt_ds = particle_file.create_dataset("p_t", data=fT, compression="gzip", compression_opts=4)
+        pt_ds.attrs['unit'] = "seconds"
+        pt_ds.attrs['name'] = 'time'
+        pt_ds.attrs['min'] = np.nanmin(iT)  # fT.min()
+        pt_ds.attrs['max'] = np.nanmax(iT)  # fT.max()
+        # page_ds = particle_file.create_dataset("p_age", data=fA, compression="gzip", compression_opts=4)
+        # page_ds.attrs['unit'] = "seconds"
+        # page_ds.attrs['name'] = 'age'
+        # page_ds.attrs['min'] = fA.min()
+        # page_ds.attrs['max'] = fA.max()
+        page_ds = particle_file.create_dataset("p_age_d", data=fAd, compression="gzip", compression_opts=4)
+        page_ds.attrs['unit'] = "days"
+        page_ds.attrs['name'] = 'age'
+        page_ds.attrs['min'] = fAd.min()
+        page_ds.attrs['max'] = fAd.max()
+        particle_file.close()
+
+        del rel_rho
+        del lifetime
+        del rho
+        del pcount
+        del fX
+        del fY
+        if fZ is not None:
+            del fZ
+        del fA
+
+    xval = np.arange(start=-a*0.5, stop=a*0.5, step=step, dtype=np.float32)
+    yval = np.arange(start=-b*0.5, stop=b*0.5, step=step, dtype=np.float32)
+    zval = None
+    if sample3D:
+        zval = np.arange(start=0.0, stop=c, step=zstep, dtype=np.float32)
+    centers_x = np.minimum(np.maximum(xval + step/2.0, -a*0.5), a*0.5)
+    centers_y = np.minimum(np.maximum(yval + step/2.0, -b*0.5), b*0.5)
+    centers_z = None
+    if sample3D:
+        centers_z = np.minimum(np.maximum(zval + zstep/2.0, 0), c)
+    us, vs, ws = (None, None, None)
+    if sample3D:
+        us = np.zeros((centers_z.shape[0], centers_y.shape[0], centers_x.shape[0]))
+        vs = np.zeros((centers_z.shape[0], centers_y.shape[0], centers_x.shape[0]))
+        ws = np.zeros((centers_z.shape[0], centers_y.shape[0], centers_x.shape[0]))
     else:
-        Npart = Nparticle
-        sys.stdout.write("final # particles: {}\n".format( Npart ))
-        sys.stdout.write("Time of pset.execute(): {} sec.\n".format(endtime - starttime))
+        us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+        vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+
+    grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
+    grid_lon_ds = grid_file.create_dataset("longitude", data=centers_x, compression="gzip", compression_opts=4)
+    grid_lon_ds.attrs['unit'] = "arc degree"
+    grid_lon_ds.attrs['unit_long'] = "arcdegree_eastwards"
+    grid_lon_ds.attrs['name'] = 'longitude'
+    grid_lon_ds.attrs['hint'] = 'zonal coordinates'
+    grid_lon_ds.attrs['min'] = centers_x.min()
+    grid_lon_ds.attrs['max'] = centers_x.max()
+    grid_lat_ds = grid_file.create_dataset("latitude", data=centers_y, compression="gzip", compression_opts=4)
+    grid_lat_ds.attrs['unit'] = "arc degree"
+    grid_lat_ds.attrs['unit_long'] = "arcdegree_northwards"
+    grid_lat_ds.attrs['name'] = 'latitude'
+    grid_lat_ds.attrs['hint'] = 'meridional coordinates'
+    grid_lat_ds.attrs['min'] = centers_y.min()
+    grid_lat_ds.attrs['max'] = centers_y.max()
+    grid_dep_ds = None
+    if sample3D:
+        grid_dep_ds = grid_file.create_dataset("depth", data=centers_z, compression="gzip", compression_opts=4)
+        grid_dep_ds.attrs['unit'] = "metres"
+        grid_dep_ds.attrs['unit_long'] = "metres_downwards"
+        grid_dep_ds.attrs['name'] = 'depth'
+        grid_dep_ds.attrs['hint'] = 'vertical coordinates'
+        grid_dep_ds.attrs['min'] = centers_z.min()
+        grid_dep_ds.attrs['max'] = centers_z.max()
+    grid_time_ds = grid_file.create_dataset("times", data=fT[0], compression="gzip", compression_opts=4)
+    grid_time_ds.attrs['unit'] = "seconds"
+    grid_time_ds.attrs['name'] = 'time'
+    grid_time_ds.attrs['min'] = np.nanmin(iT)  # fT[0].min()
+    grid_time_ds.attrs['max'] = np.nanmax(iT)  # fT[0].max()
+    grid_file.close()
+
+    us_minmax = [0., 0.]
+    us_statistics = [0., 0.]
+    us_file, us_file_ds = None, None
+    us_nc_file, us_nc_tdim, us_nc_zdim, us_nc_ydim, us_nc_xdim, us_nc_uvel = None, None, None, None, None, None
+    us_nc_tvar, us_nc_zvar, us_nc_yvar, us_nc_xvar = None, None, None, None
+    if not interpolate_particles:
+        us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
+        if sample3D:
+            us_file_ds = us_file.create_dataset("uo",
+                                                shape=(1, us.shape[0], us.shape[1], us.shape[2]), dtype=us.dtype,
+                                                maxshape=(fT.shape[1], us.shape[0], us.shape[1], us.shape[2]),
+                                                compression="gzip",
+                                                compression_opts=4)
+        else:
+            us_file_ds = us_file.create_dataset("uo",
+                                                shape=(1, us.shape[0], us.shape[1]),
+                                                dtype=us.dtype,
+                                                maxshape=(fT.shape[1], us.shape[0], us.shape[1]),
+                                                compression="gzip", compression_opts=4)
+        us_file_ds.attrs['unit'] = "m/s"
+        us_file_ds.attrs['name'] = 'zonal_velocity'
+        # netcdf u write:
+        us_nc_file = Dataset(os.path.join(odir, "hydrodynamic_U.nc"), mode='w', format='NETCDF4_CLASSIC')
+        if sample3D:
+            us_nc_xdim = us_nc_file.createDimension('lon', us.shape[2])
+            us_nc_ydim = us_nc_file.createDimension('lat', us.shape[1])
+            us_nc_zdim = us_nc_file.createDimension('depth', us.shape[0])
+            us_nc_xvar = us_nc_file.createVariable('lon', np.float32, ('lon', ))
+            us_nc_yvar = us_nc_file.createVariable('lat', np.float32, ('lat', ))
+            us_nc_zvar = us_nc_file.createVariable('depth', np.float32, ('depth', ))
+            us_nc_zvar.units = "metres"
+            us_nc_zvar.long_name = "depth"
+            us_nc_zvar[:] = centers_z
+        else:
+            us_nc_xdim = us_nc_file.createDimension('lon', us.shape[1])
+            us_nc_ydim = us_nc_file.createDimension('lat', us.shape[0])
+            us_nc_xvar = us_nc_file.createVariable('lon', np.float32, ('lon', ))
+            us_nc_yvar = us_nc_file.createVariable('lat', np.float32, ('lat', ))
+        us_nc_tdim = us_nc_file.createDimension('time', None)
+        us_nc_tvar = us_nc_file.createVariable('time', np.float32, ('time', ))
+        us_nc_file.title = "perlin-3D-U"
+        us_nc_file.subtitle = "365d-daily"
+        us_nc_xvar.units = "arcdegree_eastwards"
+        us_nc_xvar.long_name = "longitude"
+        us_nc_yvar.units = "arcdegree_northwards"
+        us_nc_yvar.long_name = "latitude"
+        us_nc_tvar.units = "seconds"
+        us_nc_tvar.long_name = "time"
+        us_nc_xvar[:] = centers_x
+        us_nc_yvar[:] = centers_y
+        if sample3D:
+            us_nc_uvel = us_nc_file.createVariable('u', np.float32, ('time', 'depth', 'lat', 'lon'))
+        else:
+            us_nc_uvel = us_nc_file.createVariable('u', np.float32, ('time', 'lat', 'lon'))
+        us_nc_uvel.units = "m/s"
+        us_nc_uvel.standard_name = "eastwards longitudinal zonal velocity"
+
+    vs_minmax = [0., 0.]
+    vs_statistics = [0., 0.]
+    vs_file, vs_file_ds = None, None
+    vs_nc_file, vs_nc_tdim, vs_nc_zdim, vs_nc_ydim, vs_nc_xdim, vs_nc_vvel = None, None, None, None, None, None
+    vs_nc_tvar, vs_nc_zvar, vs_nc_yvar, vs_nc_xvar = None, None, None, None
+    if not interpolate_particles:
+        vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
+        if sample3D:
+            vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1], vs.shape[2]), dtype=vs.dtype,
+                                                maxshape=(fT.shape[1], vs.shape[0], vs.shape[1], vs.shape[2]),
+                                                compression="gzip",
+                                                compression_opts=4)
+        else:
+            vs_file_ds = vs_file.create_dataset("vo",
+                                                shape=(1, vs.shape[0], vs.shape[1]),
+                                                dtype=vs.dtype,
+                                                maxshape=(fT.shape[1], vs.shape[0], vs.shape[1]),
+                                                compression="gzip", compression_opts=4)
+        vs_file_ds.attrs['unit'] = "m/s"
+        vs_file_ds.attrs['name'] = 'meridional_velocity'
+        # netcdf u write:
+        vs_nc_file = Dataset(os.path.join(odir, "hydrodynamic_V.nc"), mode='w', format='NETCDF4_CLASSIC')
+        if sample3D:
+            vs_nc_xdim = vs_nc_file.createDimension('lon', vs.shape[2])
+            vs_nc_ydim = vs_nc_file.createDimension('lat', vs.shape[1])
+            vs_nc_zdim = vs_nc_file.createDimension('depth', vs.shape[0])
+            vs_nc_xvar = vs_nc_file.createVariable('lon', np.float32, ('lon', ))
+            vs_nc_yvar = vs_nc_file.createVariable('lat', np.float32, ('lat', ))
+            vs_nc_zvar = vs_nc_file.createVariable('depth', np.float32, ('depth', ))
+            vs_nc_zvar.units = "metres"
+            vs_nc_zvar.long_name = "depth"
+            vs_nc_zvar[:] = centers_z
+        else:
+            vs_nc_xdim = vs_nc_file.createDimension('lon', vs.shape[1])
+            vs_nc_ydim = vs_nc_file.createDimension('lat', vs.shape[0])
+            vs_nc_xvar = vs_nc_file.createVariable('lon', np.float32, ('lon', ))
+            vs_nc_yvar = vs_nc_file.createVariable('lat', np.float32, ('lat', ))
+        vs_nc_tdim = vs_nc_file.createDimension('time', None)
+        vs_nc_tvar = vs_nc_file.createVariable('time', np.float32, ('time', ))
+        vs_nc_file.title = "perlin-3D-V"
+        vs_nc_file.subtitle = "365d-daily"
+        vs_nc_xvar.units = "arcdegree_eastwards"
+        vs_nc_xvar.long_name = "longitude"
+        vs_nc_yvar.units = "arcdegree_northwards"
+        vs_nc_yvar.long_name = "latitude"
+        vs_nc_tvar.units = "seconds"
+        vs_nc_tvar.long_name = "time"
+        vs_nc_xvar[:] = centers_x
+        vs_nc_yvar[:] = centers_y
+        if sample3D:
+            vs_nc_vvel = vs_nc_file.createVariable('v', np.float32, ('time', 'depth', 'lat', 'lon'))
+        else:
+            vs_nc_vvel = vs_nc_file.createVariable('v', np.float32, ('time', 'lat', 'lon'))
+        vs_nc_vvel.units = "m/s"
+        vs_nc_vvel.standard_name = "northwards latitudinal meridional velocity"
+
+    ws_minmax, ws_statistics, ws_file, ws_file_ds = None, None, None, None
+    ws_nc_file, ws_nc_tdim, ws_nc_zdim, ws_nc_ydim, ws_nc_xdim, ws_nc_wvel = None, None, None, None, None, None
+    ws_nc_tvar, ws_nc_zvar, ws_nc_yvar, ws_nc_xvar = None, None, None, None
+    if sample3D:
+        ws_minmax = [0., 0.]
+        ws_statistics = [0., 0.]
+        if not interpolate_particles:
+            ws_file = h5py.File(os.path.join(odir, "hydrodynamic_W.h5"), "w")
+            ws_file_ds = ws_file.create_dataset("wo",
+                                                shape=(1, ws.shape[0], ws.shape[1], ws.shape[2]),
+                                                dtype=ws.dtype,
+                                                maxshape=(fT.shape[1], ws.shape[0], ws.shape[1], ws.shape[2]),
+                                                compression="gzip", compression_opts=4)
+            ws_file_ds.attrs['unit'] = "m/s"
+            ws_file_ds.attrs['name'] = 'vertical_velocity'
+            # netcdf u write:
+            ws_nc_file = Dataset(os.path.join(odir, "hydrodynamic_W.nc"), mode='w', format='NETCDF4_CLASSIC')
+            ws_nc_xdim = ws_nc_file.createDimension('lon', ws.shape[2])
+            ws_nc_ydim = ws_nc_file.createDimension('lat', ws.shape[1])
+            ws_nc_zdim = ws_nc_file.createDimension('depth', ws.shape[0])
+            ws_nc_tdim = ws_nc_file.createDimension('time', None)
+            ws_nc_xvar = ws_nc_file.createVariable('lon', np.float32, ('lon', ))
+            ws_nc_yvar = ws_nc_file.createVariable('lat', np.float32, ('lat', ))
+            ws_nc_zvar = ws_nc_file.createVariable('depth', np.float32, ('depth', ))
+            ws_nc_tvar = ws_nc_file.createVariable('time', np.float32, ('time', ))
+            ws_nc_file.title = "perlin-3D-W"
+            ws_nc_file.subtitle = "365d-daily"
+            ws_nc_xvar.units = "arcdegree_eastwards"
+            ws_nc_xvar.long_name = "longitude"
+            ws_nc_yvar.units = "arcdegree_northwards"
+            ws_nc_yvar.long_name = "latitude"
+            ws_nc_zvar.units = "metres"
+            ws_nc_zvar.long_name = "depth"
+            ws_nc_tvar.units = "seconds"
+            ws_nc_tvar.long_name = "time"
+            ws_nc_xvar[:] = centers_x
+            ws_nc_yvar[:] = centers_y
+            ws_nc_zvar[:] = centers_z
+            ws_nc_wvel = ws_nc_file.createVariable('w', np.float32, ('time', 'depth', 'lat', 'lon'))
+            ws_nc_wvel.units = "m/s"
+            ws_nc_wvel.standard_name = "vertical velocity"
+
+    print("Preparing field datatypes ...")
+    if not (isinstance(U, da.core.Array) or isinstance(U, np.ndarray)):
+        del U
+        del V
+        if W is not None:
+            del W
+        Upath = field_fpath + "U.nc"
+        Ufile = xr.open_dataset(Upath, decode_cf=True, engine='netcdf4', chunks='auto')
+        U = Ufile['vozocrtx'].data
+        if DBG_MSG:
+            print("U - shape: {}".format(U.shape))
+        Vpath = field_fpath + "V.nc"
+        Vfile = xr.open_dataset(Vpath, decode_cf=True, engine='netcdf4', chunks='auto')
+        V = Vfile['vomecrty'].data
+        if DBG_MSG:
+            print("V - shape: {}".format(V.shape))
+        if use_3D and sample3D:
+            Wpath = field_fpath + "W.nc"
+            Wfile = xr.open_dataset(Wpath, decode_cf=True, engine='netcdf4', chunks='auto')
+            W = Wfile['W'].data
+            if DBG_MSG:  # DBG_MSG
+                print("W - shape: {}".format(W.shape))
+    if not isinstance(fdepths, np.ndarray):
+        fdepths = np.array(fdepths)
+    if not isinstance(flats, np.ndarray):
+        flats = np.array(flats)
+    if not isinstance(flons, np.ndarray):
+        flons = np.array(flons)
+
+    print("Interpolating UVW on a regular-square grid ...")
+    # total_items = fT.shape[1]
+    total_items = (ti_max - ti_min)+1
+    for ti in range(ti_min, ti_max+1):  # range(fT.shape[1]):
+        uvw_ti = ti
+        current_time = iT[ti]
+        if periodicFlag:
+            uvw_ti = uvw_ti % U.shape[0]
+        else:
+            uvw_ti = min(uvw_ti, U.shape[0]-1)
+
+        fU, fV, fW = None, None, None
+        if interpolate_particles:
+            # ==== ==== create files ==== ==== #
+            us_minmax = [0., 0.]
+            us_statistics = [0., 0.]
+            u_h5_filename = "hydrodynamic_U_d%04d.h5" % (ti, )
+            us_file = h5py.File(os.path.join(odir, u_h5_filename), "w")
+            if sample3D:
+                us_file_ds = us_file.create_dataset("uo",
+                                                    shape=(1, us.shape[0], us.shape[1], us.shape[2]), dtype=us.dtype,
+                                                    maxshape=(1, us.shape[0], us.shape[1], us.shape[2]),
+                                                    compression="gzip",
+                                                    compression_opts=4)
+            else:
+                us_file_ds = us_file.create_dataset("uo",
+                                                    shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype,
+                                                    maxshape=(1, us.shape[0], us.shape[1]),
+                                                    compression="gzip", compression_opts=4)
+            us_file_ds.attrs['unit'] = "m/s"
+            us_file_ds.attrs['time'] = current_time
+            us_file_ds.attrs['time_unit'] = "s"
+            us_file_ds.attrs['name'] = 'zonal_velocity'
+            # netcdf u write:
+            u_nc_filename = "hydrodynamic_U_d%04d.nc" % (ti, )
+            us_nc_file = Dataset(os.path.join(odir, u_nc_filename), mode='w', format='NETCDF4_CLASSIC')
+            if sample3D:
+                us_nc_xdim = us_nc_file.createDimension('lon', us.shape[2])
+                us_nc_ydim = us_nc_file.createDimension('lat', us.shape[1])
+                us_nc_zdim = us_nc_file.createDimension('depth', us.shape[0])
+                us_nc_tdim = us_nc_file.createDimension('time', 1)
+                us_nc_xvar = us_nc_file.createVariable('lon', np.float32, ('lon',))
+                us_nc_yvar = us_nc_file.createVariable('lat', np.float32, ('lat',))
+                us_nc_zvar = us_nc_file.createVariable('depth', np.float32, ('depth',))
+                us_nc_tvar = us_nc_file.createVariable('time', np.float32, ('time',))
+                us_nc_zvar.units = "metres"
+                us_nc_zvar.long_name = "depth"
+                us_nc_zvar[:] = centers_z
+            else:
+                us_nc_xdim = us_nc_file.createDimension('lon', us.shape[1])
+                us_nc_ydim = us_nc_file.createDimension('lat', us.shape[0])
+                us_nc_tdim = us_nc_file.createDimension('time', 1)
+                us_nc_xvar = us_nc_file.createVariable('lon', np.float32, ('lon',))
+                us_nc_yvar = us_nc_file.createVariable('lat', np.float32, ('lat',))
+                us_nc_tvar = us_nc_file.createVariable('time', np.float32, ('time',))
+            us_nc_file.title = "perlin-3D-U"
+            us_nc_file.subtitle = "365d-daily"
+            us_nc_xvar.units = "arcdegree_eastwards"
+            us_nc_xvar.long_name = "longitude"
+            us_nc_yvar.units = "arcdegree_northwards"
+            us_nc_yvar.long_name = "latitude"
+            us_nc_tvar.units = "seconds"
+            us_nc_tvar.long_name = "time"
+            us_nc_xvar[:] = centers_x
+            us_nc_yvar[:] = centers_y
+            if sample3D:
+                us_nc_uvel = us_nc_file.createVariable('u', np.float32, ('time', 'depth', 'lat', 'lon'))
+            else:
+                us_nc_uvel = us_nc_file.createVariable('u', np.float32, ('time', 'lat', 'lon'))
+            us_nc_uvel.units = "m/s"
+            us_nc_uvel.standard_name = "eastwards longitudinal zonal velocity"
+
+            vs_minmax = [0., 0.]
+            vs_statistics = [0., 0.]
+            v_h5_filename = "hydrodynamic_V_d%04d.h5" % (ti, )
+            vs_file = h5py.File(os.path.join(odir, v_h5_filename), "w")
+            if sample3D:
+                vs_file_ds = vs_file.create_dataset("vo",
+                                                    shape=(1, vs.shape[0], vs.shape[1], vs.shape[2]), dtype=vs.dtype,
+                                                    maxshape=(1, vs.shape[0], vs.shape[1], vs.shape[2]),
+                                                    compression="gzip",
+                                                    compression_opts=4)
+            else:
+                vs_file_ds = vs_file.create_dataset("vo",
+                                                    shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype,
+                                                    maxshape=(1, vs.shape[0], vs.shape[1]),
+                                                    compression="gzip", compression_opts=4)
+            vs_file_ds.attrs['unit'] = "m/s"
+            vs_file_ds.attrs['time'] = current_time
+            vs_file_ds.attrs['time_unit'] = "s"
+            vs_file_ds.attrs['name'] = 'meridional_velocity'
+            # netcdf u write:
+            v_nc_filename = "hydrodynamic_V_d%04d.nc" % (ti, )
+            vs_nc_file = Dataset(os.path.join(odir, v_nc_filename), mode='w', format='NETCDF4_CLASSIC')
+            if sample3D:
+                vs_nc_xdim = vs_nc_file.createDimension('lon', vs.shape[2])
+                vs_nc_ydim = vs_nc_file.createDimension('lat', vs.shape[1])
+                vs_nc_zdim = vs_nc_file.createDimension('depth', vs.shape[0])
+                vs_nc_tdim = vs_nc_file.createDimension('time', 1)
+                vs_nc_xvar = vs_nc_file.createVariable('lon', np.float32, ('lon', ))
+                vs_nc_yvar = vs_nc_file.createVariable('lat', np.float32, ('lat', ))
+                vs_nc_zvar = vs_nc_file.createVariable('depth', np.float32, ('depth', ))
+                vs_nc_tvar = vs_nc_file.createVariable('time', np.float32, ('time', ))
+                vs_nc_zvar.units = "metres"
+                vs_nc_zvar.long_name = "depth"
+                vs_nc_zvar[:] = centers_z
+            else:
+                vs_nc_xdim = vs_nc_file.createDimension('lon', vs.shape[1])
+                vs_nc_ydim = vs_nc_file.createDimension('lat', vs.shape[0])
+                vs_nc_tdim = vs_nc_file.createDimension('time', 1)
+                vs_nc_xvar = vs_nc_file.createVariable('lon', np.float32, ('lon', ))
+                vs_nc_yvar = vs_nc_file.createVariable('lat', np.float32, ('lat', ))
+                vs_nc_tvar = vs_nc_file.createVariable('time', np.float32, ('time', ))
+            vs_nc_file.title = "perlin-3D-V"
+            vs_nc_file.subtitle = "365d-daily"
+            vs_nc_xvar.units = "arcdegree_eastwards"
+            vs_nc_xvar.long_name = "longitude"
+            vs_nc_yvar.units = "arcdegree_northwards"
+            vs_nc_yvar.long_name = "latitude"
+            vs_nc_tvar.units = "seconds"
+            vs_nc_tvar.long_name = "time"
+            vs_nc_xvar[:] = centers_x
+            vs_nc_yvar[:] = centers_y
+            if sample3D:
+                vs_nc_vvel = vs_nc_file.createVariable('v', np.float32, ('time', 'depth', 'lat', 'lon'))
+            else:
+                vs_nc_vvel = vs_nc_file.createVariable('v', np.float32, ('time', 'lat', 'lon'))
+            vs_nc_vvel.units = "m/s"
+            vs_nc_vvel.standard_name = "northwards latitudinal meridional velocity"
+
+            if use_3D and sample3D:
+                ws_minmax = [0., 0.]
+                ws_statistics = [0., 0.]
+                w_h5_filename = "hydrodynamic_W_d%04d.h5" % (ti, )
+                ws_file = h5py.File(os.path.join(odir, w_h5_filename), "w")
+                ws_file_ds = ws_file.create_dataset("wo",
+                                                    shape=(1, ws.shape[0], ws.shape[1], ws.shape[2]), dtype=ws.dtype,
+                                                    maxshape=(fT.shape[1], ws.shape[0], ws.shape[1], ws.shape[2]),
+                                                    compression="gzip", compression_opts=4)
+                ws_file_ds.attrs['unit'] = "m/s"
+                ws_file_ds.attrs['time'] = current_time
+                ws_file_ds.attrs['time_unit'] = "s"
+                ws_file_ds.attrs['name'] = 'vertical_velocity'
+                # netcdf u write:
+                w_nc_filename = "hydrodynamic_W_d%04d.nc" % (ti, )
+                ws_nc_file = Dataset(os.path.join(odir, w_nc_filename), mode='w', format='NETCDF4_CLASSIC')
+                ws_nc_xdim = ws_nc_file.createDimension('lon', ws.shape[2])
+                ws_nc_ydim = ws_nc_file.createDimension('lat', ws.shape[1])
+                ws_nc_zdim = ws_nc_file.createDimension('depth', ws.shape[0])
+                ws_nc_tdim = ws_nc_file.createDimension('time', 1)
+                ws_nc_xvar = ws_nc_file.createVariable('lon', np.float32, ('lon', ))
+                ws_nc_yvar = ws_nc_file.createVariable('lat', np.float32, ('lat', ))
+                ws_nc_zvar = ws_nc_file.createVariable('depth', np.float32, ('depth', ))
+                ws_nc_tvar = ws_nc_file.createVariable('time', np.float32, ('time', ))
+                ws_nc_file.title = "perlin-3D-W"
+                ws_nc_file.subtitle = "365d-daily"
+                ws_nc_xvar.units = "arcdegree_eastwards"
+                ws_nc_xvar.long_name = "longitude"
+                ws_nc_yvar.units = "arcdegree_northwards"
+                ws_nc_yvar.long_name = "latitude"
+                ws_nc_zvar.units = "metres"
+                ws_nc_zvar.long_name = "depth"
+                ws_nc_tvar.units = "seconds"
+                ws_nc_tvar.long_name = "time"
+                ws_nc_xvar[:] = centers_x
+                ws_nc_yvar[:] = centers_y
+                ws_nc_zvar[:] = centers_z
+                ws_nc_wvel = ws_nc_file.createVariable('w', np.float32, ('time', 'depth', 'lat', 'lon'))
+                ws_nc_wvel.units = "m/s"
+                ws_nc_wvel.standard_name = "vertical velocity"
+            # ==== === files created. === ==== #
+
+        if interpolate_particles:
+            uvw_ti1 = uvw_ti + 1
+            if periodicFlag:
+                uvw_ti1 = uvw_ti1 % U.shape[0]
+            else:
+                uvw_ti1 = min(uvw_ti1, U.shape[0]-1)
+            tx0 = iT_min + float(uvw_ti) * idt if not reverse_time else iT_max + float(uvw_ti) * idt
+            tx1 = iT_min + float(min(uvw_ti1, iT.shape[0] - 1)) * idt
+            tx1 = (iT_max + float(min(uvw_ti1, iT.shape[0] - 1)) * idt) if reverse_time else tx1
+            if DBG_MSG:  #
+                print("tx0: {}, tx1: {}".format(tx0, tx1))
+            p_ti0 = time_index_value(tx0, global_fT, _ft_dt=fT_dt)
+            p_tt = time_partion_value(tx0, global_fT, _ft_dt=fT_dt)
+            p_ti1 = time_index_value(tx1, global_fT, _ft_dt=fT_dt)
+            if DBG_MSG:  #
+                print("p_ti0: {}, p_ti1: {}, p_tt: {}".format(p_ti0, p_ti1, p_tt))
+
+            if sample3D:
+                fU = np.array((1.0-p_tt) * U[p_ti0] + p_tt * U[p_ti1])
+                if DBG_MSG:
+                    print("fU - shape: {}".format(fU.shape))
+                fV = np.array((1.0-p_tt) * V[p_ti0] + p_tt * V[p_ti1])
+                if DBG_MSG:
+                    print("fV - shape: {}".format(fV.shape))
+                fW = np.array((1.0-p_tt) * W[p_ti0] + p_tt * W[p_ti1])
+                if DBG_MSG:
+                    print("fW - shape: {}".format(fW.shape))
+            else:
+                fU = np.array((1.0-p_tt) * U[p_ti0] + p_tt * U[p_ti1])
+                if DBG_MSG:
+                    print("fU - shape: {}".format(fU.shape))
+                fV = np.array((1.0-p_tt) * V[p_ti0] + p_tt * V[p_ti1])
+                if DBG_MSG:
+                    print("fV - shape: {}".format(fV.shape))
+        else:
+            if sample3D:
+                fU = np.array(U[uvw_ti])
+                if DBG_MSG:
+                    print("fU - shape: {}".format(fU.shape))
+                fV = np.array(V[uvw_ti])
+                if DBG_MSG:
+                    print("fV - shape: {}".format(fV.shape))
+                fW = np.array(W[uvw_ti])
+                if DBG_MSG:
+                    print("fW - shape: {}".format(fW.shape))
+            else:
+                fU = np.array(U[uvw_ti])
+                fV = np.array(V[uvw_ti])
+
+        p_center_z = None
+        ws_local = None
+        if sample3D:
+            us[:, :, :] = 0
+            vs[:, :, :] = 0
+            ws[:, :, :] = 0
+            mgrid = (fdepths, flats, flons)
+            if DBG_MSG:
+                print("input meshgrid - shape: ({}, {}, {})".format(mgrid[0].shape[0],
+                                                                    mgrid[1].shape[0],
+                                                                    mgrid[2].shape[0]))
+            p_center_z, p_center_y, p_center_x = np.meshgrid(centers_z, centers_y, centers_x, sparse=False, indexing='ij', copy=False)
+            gcenters = (p_center_z.flatten(), p_center_y.flatten(), p_center_x.flatten())
+            if DBG_MSG:
+                print("interpolate points - shape: ({}, {}, {})".format(gcenters[0].shape[0], gcenters[1].shape[0], gcenters[2].shape[0]))
+
+            us_local = interpn(mgrid, fU, gcenters, method='linear', fill_value=.0)
+            vs_local = interpn(mgrid, fV, gcenters, method='linear', fill_value=.0)
+            ws_local = interpn(mgrid, fW, gcenters, method='linear', fill_value=.0)
+
+            us[:, :, :] = np.reshape(us_local, p_center_x.shape)
+            vs[:, :, :] = np.reshape(vs_local, p_center_y.shape)
+            ws[:, :, :] = np.reshape(ws_local, p_center_z.shape)
+            del fU
+            fU = None
+            del fV
+            fV = None
+            del fW
+            fW = None
+        else:
+            us[:, :] = 0
+            vs[:, :] = 0
+            mgrid = (flats, flons)
+            p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
+            gcenters = (p_center_y.flatten(), p_center_x.flatten())
+            # print("gcenters dims = ({}, {}, {})".format(gcenters[0].shape, gcenters[1].shape, gcenters[2].shape))
+            # print("mgrid dims = ({}, {}, {})".format(mgrid[0].shape, mgrid[1].shape, mgrid[2].shape))
+            # print("u dims = ({}, {}, {})".format(U.shape[0], U.shape[1], U.shape[2]))
+            # print("v dims = ({}, {}, {})".format(V.shape[0], V.shape[1], V.shape[2]))
+            us_local = interpn(mgrid, fU, gcenters, method='linear', fill_value=.0)  # U[uvw_ti]
+            vs_local = interpn(mgrid, fV, gcenters, method='linear', fill_value=.0)  # V[uvw_ti]
+            # print("us_local dims: {}".format(us_local.shape))
+            # print("vs_local dims: {}".format(vs_local.shape))
+
+            # us_local = np.reshape(us_local, p_center_y.shape)
+            # vs_local = np.reshape(vs_local, p_center_y.shape)
+            # print("us_local dims: {}".format(us_local.shape))
+            # print("vs_local dims: {}".format(vs_local.shape))
+            us[:, :] = np.reshape(us_local, p_center_x.shape)
+            vs[:, :] = np.reshape(vs_local, p_center_y.shape)
+
+        us_minmax = [min(us_minmax[0], us.min()), max(us_minmax[1], us.max())]
+        us_statistics[0] += us.mean()
+        us_statistics[1] += us.std()
+        vs_minmax = [min(vs_minmax[0], vs.min()), max(vs_minmax[1], vs.max())]
+        vs_statistics[0] += vs.mean()
+        vs_statistics[1] += vs.std()
+        if sample3D and use_3D:
+            ws_minmax = [min(ws_minmax[0], ws.min()), max(ws_minmax[1], ws.max())]
+            ws_statistics[0] += ws.mean()
+            ws_statistics[1] += ws.std()
+
+        if not interpolate_particles:
+            us_nc_uvel[ti, :, :, :] = us
+            vs_nc_vvel[ti, :, :, :] = vs
+            if sample3D:
+                ws_nc_wvel[ti, :, :, :] = ws
+            us_file_ds.resize((ti+1), axis=0)
+            vs_file_ds.resize((ti+1), axis=0)
+            if sample3D:
+                ws_file_ds.resize((ti+1), axis=0)
+            if sample3D:
+                us_file_ds[ti, :, :, :] = us
+                vs_file_ds[ti, :, :, :] = vs
+                ws_file_ds[ti, :, :, :] = ws
+            else:
+                us_file_ds[ti, :, :] = us
+                us_nc_uvel[ti, :, :] = us
+                vs_file_ds[ti, :, :] = vs
+                vs_nc_vvel[ti, :, :] = vs
+        else:
+            if sample3D:
+                us_file_ds[0, :, :, :] = us
+                us_nc_uvel[0, :, :, :] = us
+                vs_file_ds[0, :, :, :] = vs
+                vs_nc_vvel[0, :, :, :] = vs
+                ws_file_ds[0, :, :, :] = ws
+                ws_nc_wvel[0, :, :, :] = ws
+            else:
+                us_file_ds[0, :, :] = us
+                us_nc_uvel[0, :, :] = us
+                vs_file_ds[0, :, :] = vs
+                vs_nc_vvel[0, :, :] = vs
+
+        if interpolate_particles:
+            us_file_ds.attrs['min'] = us_minmax[0]
+            us_file_ds.attrs['max'] = us_minmax[1]
+            us_file_ds.attrs['mean'] = us_statistics[0]
+            us_file_ds.attrs['std'] = us_statistics[1]
+            us_file.close()
+            us_nc_tvar[0] = current_time
+            us_nc_file.close()
+            vs_file_ds.attrs['min'] = vs_minmax[0]
+            vs_file_ds.attrs['max'] = vs_minmax[1]
+            vs_file_ds.attrs['mean'] = vs_statistics[0]
+            vs_file_ds.attrs['std'] = vs_statistics[1]
+            vs_file.close()
+            vs_nc_tvar[0] = current_time
+            vs_nc_file.close()
+            if sample3D:
+                ws_file_ds.attrs['min'] = ws_minmax[0]
+                ws_file_ds.attrs['max'] = ws_minmax[1]
+                ws_file_ds.attrs['mean'] = ws_statistics[0]
+                ws_file_ds.attrs['std'] = ws_statistics[1]
+                ws_file.close()
+                ws_nc_tvar[0] = current_time
+                ws_nc_file.close()
+
+        del us_local
+        del vs_local
+        if sample3D:
+            del p_center_z
+            del ws_local
+        del p_center_y
+        del p_center_x
+        # del mgrid
+        current_item = ti
+        workdone = current_item / total_items
+        print("\rProgress: [{0:50s}] {1:.1f}%".format('#' * int(workdone * 50), workdone * 100), end="", flush=True)
+    print("\nFinished UV-interpolation.")
+
+    if not interpolate_particles:
+        us_nc_tvar[:] = fT[0]
+        vs_nc_tvar[:] = fT[0]
+        us_nc_file.close()
+        vs_nc_file.close()
+        if sample3D:
+            ws_nc_tvar[:] = fT[0]
+            ws_nc_file.close()
+        us_file_ds.attrs['min'] = us_minmax[0]
+        us_file_ds.attrs['max'] = us_minmax[1]
+        us_file_ds.attrs['mean'] = us_statistics[0] / float(fT.shape[1])
+        us_file_ds.attrs['std'] = us_statistics[1] / float(fT.shape[1])
+        us_file.close()
+        vs_file_ds.attrs['min'] = vs_minmax[0]
+        vs_file_ds.attrs['max'] = vs_minmax[1]
+        vs_file_ds.attrs['mean'] = vs_statistics[0] / float(fT.shape[1])
+        vs_file_ds.attrs['std'] = vs_statistics[1] / float(fT.shape[1])
+        vs_file.close()
+        if sample3D:
+            ws_file_ds.attrs['min'] = ws_minmax[0]
+            ws_file_ds.attrs['max'] = ws_minmax[1]
+            ws_file_ds.attrs['mean'] = ws_statistics[0] / float(fT.shape[1])
+            ws_file_ds.attrs['std'] = ws_statistics[1] / float(fT.shape[1])
+            ws_file.close()
+
+    # del gcenters
+    del centers_x
+    del centers_y
+    if sample3D:
+        del centers_z
+    del xval
+    del yval
+    if sample3D:
+        del zval
+    # del xval_start
+    # del yval_start
+    del fT
+    del dtime_array
+    del ctime_array
 
 
