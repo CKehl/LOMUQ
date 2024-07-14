@@ -37,10 +37,16 @@ method = {'RK4': AdvectionRK4, 'EE': AdvectionEE, 'RK45': AdvectionRK45}
 global_t_0 = 0
 Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
 
-xs = -16.0  # arc degree
-xe = 13.0  # arc degree
-ys = 46.0  # arc degree
-ye = 62.74  # arc degree
+# ---- total extents ---- #
+# xs = -16.0  # arc degree
+# xe = 13.0  # arc degree
+# ys = 46.0  # arc degree
+# ye = 62.74  # arc degree
+
+xs = -6.25  # arc degree
+xe = 12.75  # arc degree
+ys = 50.0  # arc degree
+ye = 60.0  # arc degree
 
 tsteps = 0
 tstepsize = 0
@@ -287,7 +293,8 @@ if __name__=='__main__':
     writeout = True
     with_GC = args.useGC
     chs = args.chs
-    gres = int(float(eval(args.gres)))
+    # gres = int(float(eval(args.gres)))
+    gres = float(eval(args.gres))
     interp_mode = args.interp_mode
     compute_mode = 'jit'  # args.compute_mode
 
@@ -322,7 +329,7 @@ if __name__=='__main__':
     elif fnmatch.fnmatchcase(os.uname()[1], "PROMETHEUS"):  # Prometheus computer - use USB drive
         CARTESIUS_SCRATCH_USERNAME = 'christian'
         headdir = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
-        odir = headdir
+        odir = os.path.join(headdir, "ENWS")
         datahead = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
         dirread_top = os.path.join(datahead, "ENWS")
         computer_env = "Prometheus"
@@ -511,8 +518,10 @@ if __name__=='__main__':
         vs_file_ds.attrs['name'] = 'zonal_velocity'
 
     print("Interpolating UV on a regular-square grid ...")
-    total_items = psT.shape[1]
+    # total_items = psT.shape[1]
+    total_items = (ti_max - ti_min)+1
     for ti in range(ti_min, ti_max+1):  # range(psT.shape[1]):
+        current_time = iT[ti]
         if interpolate_particles:
             # ==== ==== create files ==== ==== #
             us_minmax = [0., 0.]
@@ -521,6 +530,8 @@ if __name__=='__main__':
             us_file = h5py.File(os.path.join(odir, u_filename), "w")
             us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(1, us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
             us_file_ds.attrs['unit'] = "m/s"
+            us_file_ds.attrs['time'] = current_time
+            us_file_ds.attrs['time_unit'] = "s"
             us_file_ds.attrs['name'] = 'meridional_velocity'
 
             vs_minmax = [0., 0.]
@@ -529,6 +540,8 @@ if __name__=='__main__':
             vs_file = h5py.File(os.path.join(odir, v_filename), "w")
             vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(1, vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
             vs_file_ds.attrs['unit'] = "m/s"
+            vs_file_ds.attrs['time'] = current_time
+            vs_file_ds.attrs['time_unit'] = "s"
             vs_file_ds.attrs['name'] = 'zonal_velocity'
             # ==== === files created. === ==== #
 
