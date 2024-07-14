@@ -6,8 +6,13 @@ python3 NEMO_scenario.py -f nemo_example/metadata.txt -t 366 -dt 60 -ot 1440 -im
 python3 NEMO_scenario.py -f nemo_example/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 360 -fsy 180 -fsz 20 -chs 1
 
 python3 doublegyre_scenario.py -f doublegyre_example/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
-python3 doublegyre_scenario.py -f metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
-python3 doublegyre_scenario.py -f metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 1.25 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
-python3 doublegyre_scenario.py -f metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**18 -sres -1 -gres 2 -sm 'uniform' -fsx 540 -fsy 270 -fsz 20 -3D
+python3 doublegyre_scenario.py -f 3D/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 2.0 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
+python3 doublegyre_scenario.py -f 3D/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**12 -sres 1.25 -gres 2 -sm 'regular_jitter' -fsx 540 -fsy 270 -fsz 20 -3D
+python3 doublegyre_scenario.py -f 3D/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**18 -sres -1 -gres 2 -sm 'uniform' -fsx 540 -fsy 270 -fsz 20 -3D
+python3 doublegyre_scenario.py -f 3D/metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**17 -sres -1 -gres 1.5 -sm 'uniform' -fsx 540 -fsy 270 -fsz 20 -3D -tint
 
-python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 4 -t 365 -dt 600 -ot 3600
+
+python3 perlin_scenario.py -f metadata.txt -t 366 -dt 60 -ot 1440 -im 'rk4' -N 2**17 -sres -1 -gres 1.25 -sm 'uniform' -3D -tint -d
+
+python3 ENWS_scenario_Euler-only.py -f ENWS/metadata.txt -im 'rk45' -gres 4 -t 365 -dt 600 -ot 3600
+python3 ENWS_scenario_Euler-only.py -f ENWS/metadata.txt -im 'rk45' -gres 32 -t 365 -dt 1800 -ot 21600
