@@ -89,6 +89,8 @@ nwaves_x = 2
 nwaves_y = 2
 perlin_power_x = 0.55
 perlin_power_y = 0.45
+latscale = 1000.0
+vertscale = 100.0
 
 # Idea for 4D: perlin3D creates a time-consistent 3D field
 # Thus, we can use skimage to create shifted/rotated/morphed versions
@@ -171,13 +173,13 @@ def RenewParticle(particle, fieldset, time):
     SO = fieldset.south_lim
     dlat = NO - SO
     if particle.lon < WE:
-        particle.lon += dlon
+        particle.lon = WE + (math.fabs(particle.lon) - math.fabs(WE))
     if particle.lon > EA:
-        particle.lon -= dlon
+        particle.lon = EA - (math.fabs(particle.lon) - math.fabs(EA))
     if particle.lat < SO:
-        particle.lat += dlat
+        particle.lat = SO + (math.fabs(particle.lat) - math.fabs(SO))
     if particle.lat > NO:
-        particle.lat -= dlat
+        particle.lat = NO - (math.fabs(particle.lat) - math.fabs(NO))
     if fieldset.isThreeD > 0.0:
         TO = fieldset.top
         BO = fieldset.bottom
@@ -185,7 +187,6 @@ def RenewParticle(particle, fieldset, time):
             particle.depth = TO + 1.0
         if particle.depth > BO:
             particle.depth = BO - 1.0
-
 
 def periodicBC(particle, fieldSet, time):
     EA = fieldset.east_lim
@@ -264,8 +265,9 @@ def perlin_waves(periodic_wrap=False, write_out=False, anisotropic_diffusion=Fal
     V_OP_2D = np.stack((V_operator*0.5, V_operator*1.0, V_operator*0.5), axis=2)
     V_OP_2D = np.transpose(V_OP_2D, [2,0,1])
 
-    a = (100.0 * img_shape[0])
-    b = (100.0 * img_shape[1])
+    a = (latscale * img_shape[0])
+    b = (latscale * img_shape[1])
+    c = 0.001
 
     lon = np.linspace(-a*0.5, a*0.5, img_shape[0], dtype=np.float32)
     sys.stdout.write("lon field: {}\n".format(lon.size))
@@ -385,9 +387,9 @@ def perlin_waves(periodic_wrap=False, write_out=False, anisotropic_diffusion=Fal
         fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=datetime.timedelta(days=366))
     else:
         fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, allow_time_extrapolation=True)
-
     if write_out:
         fieldset.write(filename=write_out)
+
     if anisotropic_diffusion:
         Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, mesh='flat')
         fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=False, mesh='flat', transpose=False, allow_time_extrapolation=True))
@@ -397,7 +399,7 @@ def perlin_waves(periodic_wrap=False, write_out=False, anisotropic_diffusion=Fal
         fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh='flat')
         fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh='flat')
     # return fieldset, a, b
-    return lon, lat, times, fieldset, U, W
+    return lon, lat, times, fieldset, a, b, c, U, W
 
 
 def perlin_waves3D(periodic_wrap=False, write_out=False, anisotropic_diffusion=False):
@@ -432,9 +434,10 @@ def perlin_waves3D(periodic_wrap=False, write_out=False, anisotropic_diffusion=F
     W_OP_3D = np.stack((W_OP_2D*0.5, W_OP_2D*1.0, W_OP_2D*0.5), axis=3)
     W_OP_3D = np.transpose(W_OP_3D, [3, 0, 1, 2])
 
-    a = (100.0 * vol_shape[0])
-    b = (100.0 * vol_shape[1])
-    c = (100.0 * vol_shape[2])
+    a = (latscale * vol_shape[0])
+    b = (latscale * vol_shape[1])
+    c = (vertscale * vol_shape[2])
+    print("Dimensions - a: {}, b: {}, c:{}".format(a, b, c))
 
     lon = np.linspace(-a*0.5, a*0.5, vol_shape[0], dtype=np.float32)
     sys.stdout.write("lon field: {}\n".format(lon.size))
@@ -520,7 +523,8 @@ def perlin_waves3D(periodic_wrap=False, write_out=False, anisotropic_diffusion=F
         Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
         for i in range(lon.shape[0]):
             for j in range(lat.shape[0]):
-                Kh_meridional[j, i, :] = Kh_meridional_profile[j] * 100.
+                for k in range(depth.shape[0]):
+                    Kh_meridional[j, i, k] = Kh_meridional_profile[j] * 100.
     else:
         print("Generating isotropic diffusion value ...")
         # Kh_zonal = np.ones((ydim, xdim), dtype=np.float32) * np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
@@ -536,19 +540,18 @@ def perlin_waves3D(periodic_wrap=False, write_out=False, anisotropic_diffusion=F
         fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, time_periodic=datetime.timedelta(days=366).total_seconds())
     else:
         fieldset = FieldSet.from_data(data, dimensions, mesh='flat', transpose=False, allow_time_extrapolation=True)
+    if write_out:
+        fieldset.write(filename=write_out)
 
     if anisotropic_diffusion:
         Kh_grid = RectilinearZGrid(lon=fieldset.U.lon, lat=fieldset.U.lat, depth=fieldset.U.depth, mesh='flat')
         fieldset.add_field(Field("Kh_zonal", Kh_zonal, grid=Kh_grid, to_write=True, mesh='flat', transpose=False, allow_time_extrapolation=True))
         fieldset.add_field(Field("Kh_meridional", Kh_meridional, grid=Kh_grid, to_write=True, mesh='flat', transpose=False, allow_time_extrapolation=True))
-        fieldset.add_constant("dres", max(lat[1]-lat[0], lon[1]-lon[0]))
     else:
         fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh='flat')
         fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh='flat')
     fieldset.add_constant("dres", max(lat[1] - lat[0], lon[1] - lon[0]))
-    if write_out:
-        fieldset.write(filename=write_out)
-    return lon, lat, depth, times, fieldset, U, V, W
+    return lon, lat, depth, times, fieldset, a, b, c, U, V, W
 
 
 def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, diffusion=False):
@@ -601,11 +604,11 @@ def fieldset_from_file(periodic_wrap=False, filepath=None, simtime_days=None, di
     Kh_zonal = None
     Kh_meridional = None
     if diffusion:
-        Kh_zonal = np.random.uniform(9.5, 10.5)  # in m^2/s
-        Kh_meridional = np.random.uniform(7.5, 12.5)  # in m^2/s
-        Kh_zonal, Kh_meridional = Kh_zonal * 100.0, Kh_meridional * 100.0  # because the mesh is flat
+        Kh_zonal = np.random.uniform(0.85, 1.15) * 100.0  # in m^2/s
+        Kh_meridional = np.random.uniform(0.7, 1.3) * 100.0  # in m^2/s
         fieldset.add_constant_field("Kh_zonal", Kh_zonal, mesh="flat")
         fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh="flat")
+    fieldset.add_constant("dres", max(flats[1] - flats[0], flons[1] - flons[0]))
     return flons, flats, fdepths, ftimes, fieldset, a, b, c
 
 
@@ -812,20 +815,22 @@ if __name__=='__main__':
     parser.add_argument("-fsy", "--field_sy", dest="field_sy", type=int, default="240", help="number of original field cells in y-direction")
     parser.add_argument("-fsz", "--field_sz", dest="field_sz", type=int, default="20", help="number of original field cells in z-direction")
     parser.add_argument("-3D", "--threeD", dest="threeD", action='store_true', default=False, help="make a 3D-simulation (default: False).")
+    parser.add_argument("-AD", "--anisodiff", dest="anisotropic_diffusion", action='store_true', default=False, help="Makes the simulation use anisotropic diffusion (default: False).")
     parser.add_argument("-pint", "--integrate", dest="integrate_particles", action='store_true', default=False, help="Integrate Lagrange information, e.g. age, density etc. (default: False)")
     parser.add_argument("-tint", "--time_interpolate", dest="time_interpolation", action='store_true', default=False, help="Interpolate field data in time to daily (i.e. split) output (default: False)")
     args = parser.parse_args()
 
-    ParticleSet = ParticleFileSOA
+    ParticleSet = ParticleSetSOA
 
     filename=args.filename
 
     periodicFlag=True
-    repeatRateMinutes=720
+    repeatRateMinutes=72
     time_in_days = args.time_in_days
     time_in_years = int(float(time_in_days)/365.0)
     writeout = True
     with_GC = True
+    anisotropic_diffusion = args.anisotropic_diffusion
 
     Nparticle = int(float(eval(args.nparticles)))
     target_N = Nparticle if Nparticle > 0 else None
@@ -842,6 +847,8 @@ if __name__=='__main__':
     interpolate_particles = args.time_interpolation
     sample_mode = args.sample_mode
     interp_mode = args.interp_mode
+    if interp_mode in ['em', 'm1']:
+        anisotropic_diffusion = True
     compute_mode = 'jit'
 
     if MPI:
@@ -914,7 +921,7 @@ if __name__=='__main__':
     if writeout:
         field_fpath = os.path.join(odir,"perlin")
     if field_fpath and os.path.exists(field_fpath+"U.nc"):
-        flons, flats, fdepths, ftimes, fieldset, a, b, c = fieldset_from_file(periodic_wrap=periodicFlag, filepath=field_fpath)  #  field_fpath+".nc"
+        flons, flats, fdepths, ftimes, fieldset, a, b, c = fieldset_from_file(periodic_wrap=periodicFlag, filepath=field_fpath, diffusion=True)  #  field_fpath+".nc"
         use_3D &= hasattr(fieldset, "W")
         U = fieldset.U
         V = fieldset.V
@@ -924,16 +931,20 @@ if __name__=='__main__':
             use_3D = False
     else:
         if not use_3D:
-            flons, flats, ftimes, fieldset, U, V = perlin_waves(periodic_wrap=periodicFlag, write_out=field_fpath, anisotropic_diffusion=False)
+            flons, flats, ftimes, fieldset, a, b, c, U, V = perlin_waves(periodic_wrap=periodicFlag, write_out=field_fpath, anisotropic_diffusion=anisotropic_diffusion)
         else:
             #periodic_wrap=False, write_out=False, anisotropic_diffusion=False
-            flons, flats, fdepths, ftimes, fieldset, U, V, W = perlin_waves3D(periodic_wrap=periodicFlag, write_out=field_fpath, anisotropic_diffusion=False)
+            flons, flats, fdepths, ftimes, fieldset, a, b, c, U, V, W = perlin_waves3D(periodic_wrap=periodicFlag, write_out=field_fpath, anisotropic_diffusion=anisotropic_diffusion)
             use_W = True
+    # dc = fdepths[len(fdepths) - 1]
+    dc = fdepths[1] - fdepths[0]
+    has_diffusionfield = (hasattr(fieldset, "Kh_zonal") and hasattr(fieldset, "Kh_meridional"))
     fieldset.add_constant("east_lim", +a * 0.5)
     fieldset.add_constant("west_lim", -a * 0.5)
     fieldset.add_constant("north_lim", +b * 0.5)
     fieldset.add_constant("south_lim", -b * 0.5)
-    fieldset.add_constant("top", 0.001)
+    # fieldset.add_constant("top", 0.001)
+    fieldset.add_constant("top", .0)
     fieldset.add_constant("bottom", c)
     fieldset.add_constant("isThreeD", 1.0 if use_3D else -1.0)
 
@@ -998,10 +1009,9 @@ if __name__=='__main__':
         # ==== forward simulation ==== #
         if use_3D:
             print("sim-start: {}".format(simStart))
-            lons, lats, depths = sample_particles((-a / 2.0, a / 2.0), (-b / 2.0, b / 2.0), depth_range=(.0, c),
-                                                  res=sres if sres > 0 else None, rsampler_str=sample_mode,
-                                                  nparticle=target_N)
-            print("array sizes - lons: {}, lats: {}, depths: {}".format(len(lons), len(lats), len(depths)))
+            lons, lats, depths = sample_particles((-a / 2.0, a / 2.0), (-b / 2.0, b / 2.0), depth_range=(.0+dc, c-dc),
+                                                  res=sres if sres > 0 else None, rsampler_str=sample_mode, nparticle=target_N)
+            print("ParticleSet array sizes - lons: {}, lats: {}, depths: {}".format(len(lons), len(lats), len(depths)))
             pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, depth=depths, time=simStart)
         else:
             lons, lats, _ = sample_particles((-a / 2.0, a / 2.0), (-b / 2.0, b / 2.0), res=sres if sres > 0 else None,
@@ -1009,14 +1019,11 @@ if __name__=='__main__':
             pset = ParticleSet(fieldset=fieldset, pclass=age_ptype[(compute_mode).lower()], lon=lons, lat=lats, time=simStart)
         print("Sampling concluded.")
 
-        step = 1.0 / gres
-        zstep = gres * 10.0
-        xsteps = int(np.floor(a * gres))
-        # xsteps = int(np.ceil(a * gres))
-        ysteps = int(np.floor(b * gres))
-        # ysteps = int(np.ceil(b * gres))
-        zsteps = int(np.floor(c * (1.0 / (gres * 10.0))))
-        # zsteps = int(np.ceil(c * gres))
+        step = gres * latscale
+        zstep = gres * (vertscale / 2.0)
+        xsteps = int(np.floor(a / step))
+        ysteps = int(np.floor(b / step))
+        zsteps = int(np.floor(c / zstep))
         if DBG_MSG:
             print("=========================================================")
             print("step: gres={}, value={}".format(gres, step))
@@ -1044,7 +1051,7 @@ if __name__=='__main__':
 
         # ======== ======== End of FieldSet construction ======== ======== #
         output_file = None
-        if args.write_out:
+        if writeout:
             output_file = pset.ParticleFile(name=os.path.join(odir, out_fname+".nc"), outputdt=datetime.timedelta(minutes=outdt_minutes))
 
         delete_func = RenewParticle
@@ -1075,6 +1082,8 @@ if __name__=='__main__':
             kernelfunc = AdvectionDiffusionM1
         kernels = pset.Kernel(kernelfunc ,delete_cfiles=True)
 
+        if not anisotropic_diffusion:
+            kernels += pset.Kernel(DiffusionUniformKh, delete_cfiles=True)
         if use_3D:
             kernels += pset.Kernel(reflect_top_bottom, delete_cfiles=True)
         kernels += pset.Kernel(initialize, delete_cfiles=True)
@@ -1082,7 +1091,14 @@ if __name__=='__main__':
         kernels += pset.Kernel(periodicBC, delete_cfiles=True)
 
         postProcessFuncs.append(perIterGC)
-        pset.execute(kernels, runtime=datetime.timedelta(days=time_in_days).total_seconds(), dt=datetime.timedelta(minutes=dt_minutes).total_seconds(), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=datetime.timedelta(minutes=outdt_minutes).total_seconds())
+        # pset.execute(kernels, runtime=datetime.timedelta(days=time_in_days).total_seconds(), dt=datetime.timedelta(minutes=dt_minutes).total_seconds(), output_file=output_file, recovery={ErrorCode.ErrorOutOfBounds: delete_func, ErrorCode.ErrorThroughSurface: reflect_top_bottom, ErrorCode.ErrorInterpolation: delete_func}, postIterationCallbacks=postProcessFuncs, callbackdt=datetime.timedelta(minutes=outdt_minutes).total_seconds())
+        pset.execute(kernels, runtime=datetime.timedelta(days=time_in_days).total_seconds(),
+                     dt=datetime.timedelta(minutes=dt_minutes).total_seconds(), output_file=output_file,
+                     recovery={ErrorCode.ErrorOutOfBounds: delete_func}, postIterationCallbacks=postProcessFuncs,
+                     callbackdt=datetime.timedelta(minutes=outdt_minutes).total_seconds())
+        # ,
+        #                                ErrorCode.ErrorThroughSurface: delete_func,
+        #                                ErrorCode.ErrorInterpolation: delete_func
 
         if MPI:
             mpi_comm = MPI.COMM_WORLD
@@ -1092,7 +1108,7 @@ if __name__=='__main__':
         else:
             endtime = ostime.process_time()
 
-        if args.write_out:
+        if writeout:
             output_file.close()
 
         # if MPI:
@@ -1116,11 +1132,16 @@ if __name__=='__main__':
     # ================================================================================================================ #
     #          P O S T - P R O C E S S I N G
     # ================================================================================================================ #
-    step = 1.0/gres
-    zstep = gres*50.0
-    xsteps = int(np.floor(a * gres))
-    ysteps = int(np.floor(b * gres))
-    zsteps = int(np.floor(c * (1.0/(gres*50.0))))
+    # step = 1.0/gres
+    # zstep = gres*50.0
+    # xsteps = int(np.floor(a * gres))
+    # ysteps = int(np.floor(b * gres))
+    # zsteps = int(np.floor(c * (1.0/(gres*50.0))))
+    step = gres * latscale
+    zstep = gres * (vertscale/2.0)
+    xsteps = int(np.floor(a / step))
+    ysteps = int(np.floor(b / step))
+    zsteps = int(np.floor(c / zstep))
 
     data_xarray = xr.open_dataset(os.path.join(odir, out_fname + ".nc"))
     N = data_xarray['lon'].data.shape[0]
@@ -1292,7 +1313,7 @@ if __name__=='__main__':
             lifetime_file_ds.attrs['unit'] = "avg. lifetime"
             lifetime_file_ds.attrs['name'] = 'lifetime'
 
-        A = float(gres**2)
+        A = float(step**2)
         total_items = fT.shape[0] * fT.shape[1]
         for ti in range(ti_min, ti_max+1):
             if interpolate_particles:
@@ -1424,7 +1445,7 @@ if __name__=='__main__':
                 z_in = z_in[np.logical_and(np.logical_and(nonnan_x, nonnan_y), nonnan_z)]
                 xpts = (np.floor(x_in+(a/2.0))*gres).astype(np.int32).flatten()
                 ypts = (np.floor(y_in+(b/2.0))*gres).astype(np.int32).flatten()
-                zpts = (np.floor(z_in / gres)).astype(np.int32).flatten()
+                zpts = (np.floor(z_in / (0.5 * gres))).astype(np.int32).flatten()
                 assert xpts.shape[0] == ypts.shape[0], "Dimensions of xpts (={}) does not match ypts(={}).".format(xpts.shape[0], ypts.shape[0])
                 assert xpts.shape[0] == zpts.shape[0], "Dimensions of xpts (={}) does not match zpts(={}).".format(xpts.shape[0], zpts.shape[0])
                 xcondition = np.logical_and((xpts >= 0), (xpts < (xsteps - 1)))
