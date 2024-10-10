@@ -46,10 +46,11 @@ global_t_0 = 0
 Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
 #Nparticle = int(math.pow(2,19)) # equals to Nparticle = 524288
 
-# a = 3.6 * 1e2  # by definition: meters
+# a = 9.6 * 1e3 # [a in km -> 10e3]
 a = 359.0
-# b = 1.8 * 1e2  # by definiton: meters
+# b = 4.8 * 1e3 # [b in km -> 10e3]
 b = 179.0
+# c = 1.0
 c = 2.1 * 1e3  # by definiton: meters
 tsteps = 122 # in steps
 tstepsize = 6.0 # unitary
@@ -60,7 +61,7 @@ tscale = 12.0*60.0*60.0 # in seconds
 # ==== yearly rotation - 3D use ==== #
 # gyre_rotation_speed = 30.5*24.0*60.0*60.0  # assume 1 rotation every 4.02 weeks
 # ==== yearly rotation - 2D use ==== #
-gyre_rotation_speed = 366.0*24.0*60.0*60.0  # assume 1 rotation every 52 weeks
+gyre_rotation_speed = (366.0*24.0*60.0*60.0)/2.0  # assume 1 rotation every 52 weeks
 
 # ==== INFO FROM NEMO-MEDUSA: realistic values are 0-2.5 [m/s] ==== #
 # scalefac = (40.0 / (1000.0/ (60.0 * 60.0)))  # 40 km/h
@@ -68,7 +69,7 @@ scalefactor = ((4.0*1000) / (60.0*60.0))  # 4 km/h
 vertical_scale = (800.0 / (24*60.0*60.0))  # 800 m/d
 # ==== ONLY APPLY BELOW SCALING IF MESH IS FLAT AND (a, b) are below 100,000 [m] ==== #
 v_scale_small = 1./1000.0 # this is to adapt, cause 1 U = 1 m/s = 1 spatial unit / time unit; spatial scale; domain = 1920 m x 960 m -> scale needs to be adapted to to interpret speed on a 1920 km x 960 km grid
-
+# v_scale_small = 1.0/(40.0*1000.0*1000.0)
 
 # -------------------------------------------------------------------------------------------------------------------- #
 
@@ -928,6 +929,10 @@ if __name__=='__main__':
                 refresh_cycle /= cycle_scaler
             repeatRateMinutes = int(refresh_cycle/60.0) if repeatRateMinutes == 720 else repeatRateMinutes
         target_N = Nparticle if target_N is not None else None
+
+# =================================================================================================================== #
+#                                               TODO
+# =================================================================================================================== #
 
         print("Sampling the grid and creating the particle set now ...")
         if backwardSimulation:
