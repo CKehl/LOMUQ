@@ -230,6 +230,14 @@ if __name__=='__main__':
         dirread_top = os.path.join(datahead, 'OFAM3_2017_daily/3D/')
         basefile_str = {'U': "ocean_u_1993_*.nc", 'V': "ocean_v_1993_*.nc"}
         computer_env = "Snellius"
+    elif fnmatch.fnmatchcase(os.uname()[1], "PROMETHEUS"):  # Prometheus computer - use USB drive
+        SNELLIUS_SCRATCH_USERNAME = 'christian'
+        headdir = "/media/{}/DATA/data/hydrodynamics/OFAM/sim/".format(SNELLIUS_SCRATCH_USERNAME)
+        odir = headdir
+        datahead = "/media/{}/DATA/data/hydrodynamics"
+        dirread_top = os.path.join(datahead, "OFAM3", "daily", "3D")
+        basefile_str = {'U': "ocean_u_1993_*.nc", 'V': "ocean_v_1993_*.nc"}
+        computer_env = "Prometheus"
     else:
         headdir = "/var/scratch/experiments"
         odir = headdir
