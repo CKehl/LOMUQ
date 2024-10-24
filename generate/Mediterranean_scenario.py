@@ -21,6 +21,7 @@ from argparse import ArgumentParser
 import numpy as np
 from numpy.random import default_rng
 import xarray as xr
+from dask.diagnostics import ProgressBar as DaskProgressBar
 import fnmatch
 import sys
 import gc
@@ -386,6 +387,7 @@ age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
 # start example: python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk4' -gres 1 -t 365 -dt 600 -ot 3600
 #                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 4 -t 365 -dt 600 -ot 3600
 #                python3 ./Mediterranean_scenario.py -f metadata.txt -N 2**14 -im rk4 -G -chs 0 --del
+#                python3 ./Mediterranean_scenario.py -f metadata.txt -N 2**18 -im em -G -chs 0 -del -t 365 -dt 3600 -ot 60*60*24 -fsx 512 -fsy 256 --dry
 # ====
 if __name__=='__main__':
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
@@ -695,7 +697,6 @@ if __name__=='__main__':
         else:
             pset.plot_and_log(target_N=Nparticle, imageFilePath=os.path.join(odir, "benchmark.png"), odir=odir)  # , xlim_range=[0, outsteps+10], ylim_range=[0, 150]
 
-    exit()
 
     # ================================================================================================= #
     #                   Resample field                  #
@@ -726,7 +727,7 @@ if __name__=='__main__':
     sample_pset = ParticleSet(fieldset=fieldset, pclass=SampleParticle, lon=np.array(p_center_x).flatten(), lat=np.array(p_center_y).flatten(), time=sample_time)
     sample_kernel = sample_pset.Kernel(sample_uv)
     sample_outname = out_fname + "_sampleuv"
-    sample_output_file = sample_pset.ParticleFile(name=os.path.join(odir,sample_outname+".nc"), outputdt=datetime.timedelta(seconds=outdt_seconds))
+    sample_output_file = sample_pset.ParticleFile(name=os.path.join(odir,sample_outname+".zarr"), outputdt=datetime.timedelta(seconds=outdt_seconds))
     postProcessFuncs = []
     if with_GC:
         postProcessFuncs = [perIterGC, ]
@@ -740,6 +741,13 @@ if __name__=='__main__':
     del sample_kernel
     del fieldset
     print("UV on CMEMS grid sampled.")
+
+    print("Convert zArray to NetCDF.")
+    ds_zarr = xr.open_zarr(os.path.join(odir, sample_outname + ".zarr"), chunks='auto')
+    encoding_dict = {key: {"zlib": True, "complevel": 3} for key in ds_zarr.data_vars}
+    with DaskProgressBar():
+        ds_zarr.to_netcdf(os.path.join(odir, sample_outname + ".nc"), compute=True, encoding=encoding_dict)
+    print("NetCDF conversion done.")
 
     print("Load sampled data ...")
     sample_xarray = xr.open_dataset(os.path.join(odir, sample_outname + ".nc"))
