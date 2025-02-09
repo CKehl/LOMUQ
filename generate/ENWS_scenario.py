@@ -9,13 +9,15 @@ try:
     from parcels import StateCode, OperationCode, ErrorCode
 except:
     from parcels import StatusCode
+    ErrorCode = StatusCode
+    StateCode = StatusCode
+    OperationCode = StatusCode
 from parcels.particleset import ParticleSet as DryParticleSet
 from parcels.particleset import BenchmarkParticleSet
 from parcels.field import Field, VectorField, NestedField
 from parcels.grid import RectilinearZGrid
 from parcels import ParcelsRandom, logger
-# from datetime import timedelta, datetime
-import datetime
+import datetime  # from datetime import timedelta, datetime
 import math
 from argparse import ArgumentParser
 import numpy as np
@@ -50,10 +52,10 @@ Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
 # ys = 46.0  # arc degree
 # ye = 62.74  # arc degree
 
-xs = -5.50      # arc degree
-xe =  35.75  # arc degree
-ys =  39.5   # arc degree
-ye =  45.5  # arc degree
+xs = -6.25  # arc degree
+xe = 12.75  # arc degree
+ys = 50.0  # arc degree
+ye = 60.0  # arc degree
 
 tsteps = 0
 tstepsize = 0
@@ -125,26 +127,27 @@ def convert_timearray(t_array, dt_minutes, ns_per_sec, debug=False, array_name="
         pass
     return t_array
 
-# -------------------------------------------------------------------------------------------------------------------- #
-
+def DeleteParticle(particle, fieldset, time):
+    if particle.valid < 0:
+        particle.valid = 0
+    particle.delete()
 
 def perIterGC():
     gc.collect()
 
-
-def create_Mediterranean_fieldset(datahead, periodic_wrap, period=365.0, chunk_level=0, anisotropic_diffusion=False):
-    currentshead = os.path.join(datahead, "currents-2D")
+def create_ENWS_fieldset(datahead, periodic_wrap, period, chunk_level=0, anisotropic_diffusion=False):
+    currentshead = os.path.join(datahead, "currents")
     print(currentshead)
     stokeshead  = os.path.join(datahead, "waves")
-    med_files = sorted(glob(os.path.join(currentshead, "2021*_h-CMCC--RFVL-MFSe3r1-MED-b20220901_re-sv01.00.nc")))
-    currents_files = {'U': med_files, 'V': med_files}
+    ENWS_files = sorted(glob(os.path.join(currentshead, "metoffice_foam1_amm7_NWS_SSC_hi2022*.nc")))
+    currents_files = {'U': ENWS_files, 'V': ENWS_files}
     currents_variables = {'U': 'uo', 'V': 'vo'}
-    currents_dimensions = {'lon': 'lon', 'lat': 'lat', 'time': 'time'}
+    currents_dimensions = {'lon': 'longitude', 'lat': 'latitude', 'time': 'time'}
     currents_nchs = None
     if chunk_level > 1:
         currents_nchs = {
-            'U': {'lon': ('lon', 32), 'lat': ('lat', 32), 'time': ('time', 1)},  #
-            'V': {'lon': ('lon', 32), 'lat': ('lat', 32), 'time': ('time', 1)},  #
+            'U': {'lon': ('longitude', 16), 'lat': ('latitude', 16), 'time': ('time', 1)},  #
+            'V': {'lon': ('longitude', 16), 'lat': ('latitude', 16), 'time': ('time', 1)},  #
         }
     elif chunk_level > 0:
         currents_nchs = {
@@ -177,14 +180,14 @@ def create_Mediterranean_fieldset(datahead, periodic_wrap, period=365.0, chunk_l
     logger.info("lons: {} - {}".format(flon[0], flon[len(flon)-1]))
     logger.info("lats: {} - {}".format(flat[0], flat[len(flat)-1]))
 
-    stokes_files = sorted(glob(os.path.join(stokeshead, "2021*_h-HCMR--WAVE-MEDWAM3-MEDATL-b20220601_re-sv01.00.nc")))
+    stokes_files = sorted(glob(os.path.join(stokeshead, "metoffice_wave_amm15_NWS_WAV_3hi2022*.nc")))
     stokes_variables = {'Uw': 'VSDX', 'Vw': 'VSDY'}
     stokes_dimensions = {'lat': 'latitude', 'lon': 'longitude', 'time': 'time'}
     stokes_nchs = None
     if chunk_level > 1:
         stokes_nchs = {
-            'Uw': {'lon': ('longitude', 32), 'lat': ('latitude', 32), 'time': ('time', 1)},
-            'Vw': {'lon': ('longitude', 32), 'lat': ('latitude', 32), 'time': ('time', 1)}
+            'Uw': {'lon': ('longitude', 16), 'lat': ('latitude', 16), 'time': ('time', 1)},
+            'Vw': {'lon': ('longitude', 16), 'lat': ('latitude', 16), 'time': ('time', 1)}
         }
     elif chunk_level > 0:
         stokes_nchs = {
@@ -250,7 +253,6 @@ def create_Mediterranean_fieldset(datahead, periodic_wrap, period=365.0, chunk_l
         fieldset.add_constant_field("Kh_meridional", Kh_meridional, mesh=fieldset.U.grid.mesh)
         # fieldset.add_constant("Kh_zonal", Kh_zonal)
         # fieldset.add_constant("Kh_meridional", Kh_meridional)
-        # fieldset.add_constant("dres", 0.00005)
 
     return fieldset
 
@@ -382,15 +384,13 @@ def age_func(particle, fieldset, time):
 periodicBC = WrapClipParticle
 age_ptype = {'scipy': AgeParticle_SciPy, 'jit': AgeParticle_JIT}
 
-
 # ====
-# start example: python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk4' -gres 1 -t 365 -dt 600 -ot 3600
-#                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 4 -t 365 -dt 600 -ot 3600
-#                python3 ./Mediterranean_scenario.py -f metadata.txt -N 2**14 -im rk4 -G -chs 0 --del
-#                python3 ./Mediterranean_scenario.py -f metadata.txt -N 2**18 -im em -G -chs 0 -del -t 365 -dt 3600 -ot 60*60*24 -fsx 512 -fsy 256 --dry
+# start example: python3 ENWS_scenario.py -f metadata.txt -N 2**14 -im rk4 -G -chs 0 --del -t 365 -dt 600 -ot 3600 -fsx 512 -fsy 256
+#                python3 ENWS_scenario.py -f metadata.txt -N 2**18 -im em -G -chs 0 -del -t 365 -dt 3600 -ot 60*60*24 -fsx 512 -fsy 256 --dry
+#                python3
 # ====
 if __name__=='__main__':
-    parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
+    parser = ArgumentParser(description="Lagrangian particle advection for the European North_West Shelf (ENWS) case")
     parser.add_argument("-f", "--filename", dest="filename", type=str, default="file.txt", help="(relative) (text) file path of the csv hyper parameters")
     parser.add_argument("-t", "--time_in_days", dest="time_in_days", type=int, default=365, help="runtime in days (default: 1)")
     parser.add_argument("-dt", "--deltatime", dest="dt", type=str, default=300, help="computational delta_t time stepping in seconds (default: 300sec = 5min = 0.05h)")
@@ -447,13 +447,12 @@ if __name__=='__main__':
     added_particles_total = (add_occurrences+1) * add_Nparticles
     total_particles = (Nparticle - int(Nparticle * pratio)) + added_particles_total
 
-
     dt_seconds = int(float(eval(args.dt)))
     outdt_seconds = int(float(eval(args.outdt)))
     nowtime = datetime.datetime.now()
     ParcelsRandom.seed(nowtime.microsecond)
 
-    branch = "Mediterranean"
+    branch = "ENWS"
     computer_env = "local/unspecified"
     scenario = "simulate"
     headdir = ""
@@ -467,31 +466,29 @@ if __name__=='__main__':
         headdir = "/scratch/{}/experiments".format("ckehl")
         odir = headdir
         datahead = "/data/oceanparcels/input_data"
-        dirread_top = os.path.join(datahead, "Mediterranean")
+        dirread_top = os.path.join(datahead, "ENWS")
         computer_env = "Gemini"
     elif fnmatch.fnmatchcase(os.uname()[1], "*.bullx*"):  # Cartesius
         CARTESIUS_SCRATCH_USERNAME = 'ckehluu'
         headdir = "/scratch/shared/{}/experiments".format(CARTESIUS_SCRATCH_USERNAME)
         odir = headdir
         datahead = "/projects/0/topios/hydrodynamic_data"
-        dirread_top = os.path.join(datahead, "Mediterranean")
+        dirread_top = os.path.join(datahead, "ENWS")
         computer_env = "Cartesius"
     elif fnmatch.fnmatchcase(os.uname()[1], "PROMETHEUS"):  # Prometheus computer - use USB drive
         CARTESIUS_SCRATCH_USERNAME = 'christian'
         headdir = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
-        odir = os.path.join(headdir, "Mediterranean")
+        odir = os.path.join(headdir, "ENWS")
         datahead = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
-        dirread_top = os.path.join(datahead, "Mediterranean")
+        dirread_top = os.path.join(datahead, "ENWS")
         computer_env = "Prometheus"
     else:
         headdir = "/var/scratch/experiments"
         odir = headdir
         dirread_pal = headdir
         datahead = "/data"
-        dirread_top = os.path.join(datahead, "Mediterranean")
+        dirread_top = os.path.join(datahead, "ENWS")
     print("running {} on {} (uname: {}) - branch '{}' - argv: {}".format(scenario, computer_env, os.uname()[1], branch, sys.argv[1:]))
-    if not os.path.exists(odir):
-        os.mkdir(odir)
 
     if os.path.sep in filename:
         head_dir = os.path.dirname(filename)
@@ -499,7 +496,7 @@ if __name__=='__main__':
             odir = head_dir
         else:
             odir = os.path.join(odir, head_dir)
-            filename = os.path.split(filename)[1]
+        filename = os.path.split(filename)[1]
     pfname, pfext = os.path.splitext(filename)
     if not os.path.exists(odir):
         os.makedirs(odir)
@@ -510,7 +507,7 @@ if __name__=='__main__':
     np.random.seed(0)
 
     period = 365.0
-    fieldset = create_Mediterranean_fieldset(datahead=dirread_top, periodic_wrap=True, period=period, chunk_level=chs, anisotropic_diffusion=(interp_mode in ['em', 'm1']))
+    fieldset = create_ENWS_fieldset(datahead=dirread_top, periodic_wrap=True, period=period, chunk_level=chs, anisotropic_diffusion=(interp_mode in ['em', 'm1']))
     fieldset.add_constant("east_lim", xe)
     fieldset.add_constant("west_lim", xs)
     fieldset.add_constant("north_lim", ye)
@@ -520,9 +517,6 @@ if __name__=='__main__':
     age_ptype[(compute_mode).lower()].life_expectancy.initial = datetime.timedelta(days=plife).total_seconds()
     a, b = xe-xs, ye-ys
     logger.info("a: {}; b: {}".format(xe-xs, ye-ys))
-
-    # if args.compute_mode == 'scipy':
-    #     Nparticle = min(Nparticle, 2**10)
 
     if MPI:
         mpi_comm = MPI.COMM_WORLD
@@ -543,7 +537,6 @@ if __name__=='__main__':
                 simStart = f.grid.time_full[0]
             break
 
-
     pclass = age_ptype[(args.compute_mode).lower()]
     if interp_mode == 'rk45':
         multiplier = -1.0 if backwardSimulation else 1.0
@@ -561,7 +554,7 @@ if __name__=='__main__':
     pset.add(psetA)
 
     output_file = None
-    out_fname = "simulate_Mediterranean"
+    out_fname = "simulate_ENWS"
     if writeout:
         if MPI and (MPI.COMM_WORLD.Get_size()>1):
             out_fname += "_MPI" + "_n{}".format(MPI.COMM_WORLD.Get_size())
@@ -703,21 +696,21 @@ if __name__=='__main__':
             pset.plot_and_log(target_N=Nparticle, imageFilePath=os.path.join(odir, "benchmark.png"), odir=odir)  # , xlim_range=[0, outsteps+10], ylim_range=[0, 150]
 
 
-    # ================================================================================================= #
-    #                   Resample field                  #
-    # ================================================================================================= #
+    # ============================================================== #
+    #                   R E S A M P L E   F I E L D                  #
+    # ============================================================== #
     if not do_resample:
         exit()
 
     xstep = (xe-xs)/field_sx
-    ystep = (ye-ys)/field_sy
-    nsteps_x = int(np.floor((xe-xs) / xstep))
+    xsteps = field_sx
     # xsteps = int(np.ceil(a * gres))
-    nsteps_y = int(np.floor((ye-ys) / ystep))
+    ystep = (ye-ys)/field_sy
+    ysteps = field_sy
     # ysteps = int(np.ceil(b * gres))
 
     xval = np.arange(start=xs, stop=xe, step=xstep, dtype=np.float32)
-    yval = np.arange(start=ys, stop=ye, step=xstep, dtype=np.float32)
+    yval = np.arange(start=ys, stop=ye, step=ystep, dtype=np.float32)
     centers_x = xval + xstep/2.0
     centers_y = yval + ystep/2.0
     us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
@@ -728,13 +721,14 @@ if __name__=='__main__':
 
     print("Sampling UV on CMEMS grid ...")
     out_fname = "resample"
-    # sample_func = sample_uv
     sample_time = 0
+    # sample_func = sample_uv
+    # fieldset = create_ENWS_fieldset(datahead=dirread_top, periodic_wrap=True, period=period, chunk_level=chs, anisotropic_diffusion=(interp_mode in ['em', 'm1']))
     p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
     sample_pset = ParticleSet(fieldset=fieldset, pclass=SampleParticle, lon=np.array(p_center_x).flatten(), lat=np.array(p_center_y).flatten(), time=sample_time)
     sample_kernel = sample_pset.Kernel(sample_uv)
     sample_outname = out_fname + "_sampleuv"
-    sample_output_file = sample_pset.ParticleFile(name=os.path.join(odir,sample_outname+".zarr"), outputdt=datetime.timedelta(seconds=outdt_seconds))
+    sample_output_file = sample_pset.ParticleFile(name=os.path.join(odir, sample_outname+".zarr"), outputdt=datetime.timedelta(seconds=outdt_seconds))
     postProcessFuncs = []
     if with_GC:
         postProcessFuncs = [perIterGC, ]
@@ -742,7 +736,8 @@ if __name__=='__main__':
         sample_pset.execute(sample_kernel, runtime=datetime.timedelta(days=time_in_days), dt=datetime.timedelta(seconds=-dt_seconds), output_file=sample_output_file, postIterationCallbacks=postProcessFuncs, callbackdt=datetime.timedelta(seconds=outdt_seconds), verbose_progress=True)
     else:
         sample_pset.execute(sample_kernel, runtime=datetime.timedelta(days=time_in_days), dt=datetime.timedelta(seconds=dt_seconds), output_file=sample_output_file, postIterationCallbacks=postProcessFuncs, callbackdt=datetime.timedelta(seconds=outdt_seconds), verbose_progress=True)
-    # sample_output_file.close()
+
+
     del sample_output_file
     del sample_pset
     del sample_kernel
