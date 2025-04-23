@@ -525,9 +525,10 @@ if __name__=='__main__':
         # us = None
         # del vs
         # vs = None
-        tsteps = int(math.floor((pT_max-pT_min)/idt)) if not reverse_time else int(math.floor((pT_min-pT_max)/idt))
+        # tsteps = int(math.floor((pT_max-pT_min)/idt)) if not reverse_time else int(math.floor((pT_min-pT_max)/idt))
+        tsteps = int(math.ceil((pT_max - pT_min) / idt)) if not reverse_time else int(math.floor((pT_min - pT_max) / idt))
         tsteps = abs(tsteps)
-        iT = np.linspace(pT_min, pT_max, tsteps, dtype=np.float64) if not reverse_time else np.linspace(pT_max, pT_min, tsteps, dtype=np.float64)
+        iT = np.linspace(pT_min, pT_max, tsteps, endpoint=True, dtype=np.float64) if not reverse_time else np.linspace(pT_max, pT_min, tsteps, endpoint=True, dtype=np.float64)
         ti_min = max(np.min(np.nonzero(iT >= cap_min)[0])-1, 0) if not reverse_time else max(np.min(np.nonzero(iT <= cap_min)[0])-1, 0)
         ti_max = min(np.max(np.nonzero(iT <= cap_max)[0])+1, iT.shape[0]-1) if not reverse_time else min(np.max(np.nonzero(iT >= cap_max)[0])+1, iT.shape[0]-1)
         iT_max = np.max(iT)
@@ -800,7 +801,8 @@ if __name__=='__main__':
                 sdx_file_ds.attrs['time_unit'] = "s"
                 sdx_file_ds.attrs['name'] = 'meridional_stokes-drift_velocity'
             if netcdf_write:
-                sdx_nc_file = Dataset(os.path.join(odir, "hydrodynamic_SDX.nc"), mode='w', format='NETCDF4_CLASSIC')
+                sdx_filename = "hydrodynamic_SDX_d%d.nc" % (ti, )
+                sdx_nc_file = Dataset(os.path.join(odir, sdx_filename), mode='w', format='NETCDF4_CLASSIC')
                 sdx_nc_xdim = sdx_nc_file.createDimension('lon', sdx.shape[1])
                 sdx_nc_ydim = sdx_nc_file.createDimension('lat', sdx.shape[0])
                 sdx_nc_tdim = sdx_nc_file.createDimension('time', 1)
@@ -836,7 +838,8 @@ if __name__=='__main__':
                 sdy_file_ds.attrs['time_unit'] = "s"
                 sdy_file_ds.attrs['name'] = 'zonal_stokes-drift_velocity'
             if netcdf_write:
-                sdy_nc_file = Dataset(os.path.join(odir, "hydrodynamic_SDY.nc"), mode='w', format='NETCDF4_CLASSIC')
+                sdy_filename = "hydrodynamic_SDY_d%d.nc" %(ti, )
+                sdy_nc_file = Dataset(os.path.join(odir, sdy_filename), mode='w', format='NETCDF4_CLASSIC')
                 sdy_nc_xdim = sdy_nc_file.createDimension('lon', sdy.shape[1])
                 sdy_nc_ydim = sdy_nc_file.createDimension('lat', sdy.shape[0])
                 sdy_nc_tdim = sdy_nc_file.createDimension('time', 1)
