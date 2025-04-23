@@ -3,18 +3,23 @@ Author: Dr. Christian Kehl
 Date: 11-02-2020
 """
 
-from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, AdvectionDiffusionEM, AdvectionDiffusionM1
-from parcels import FieldSet, ScipyParticle, JITParticle, Variable, AdvectionRK4, StateCode, OperationCode, ErrorCode
-from parcels.particleset import ParticleSet as BenchmarkParticleSet
-from parcels.field import Field, VectorField, NestedField, SummedField
+from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, AdvectionDiffusionEM, AdvectionDiffusionM1, DiffusionUniformKh
+from parcels import FieldSet, ScipyParticle, JITParticle, Variable, AdvectionRK4
+try:
+    from parcels import StateCode, OperationCode, ErrorCode
+except:
+    from parcels import StatusCode
+from parcels.particleset import ParticleSet as DryParticleSet
+from parcels.particleset import BenchmarkParticleSet
+from parcels.field import Field, VectorField, NestedField
 from parcels.grid import RectilinearZGrid
-from parcels import ParcelsRandom
+from parcels import ParcelsRandom, logger
 from datetime import timedelta, datetime
 import math
 from argparse import ArgumentParser
 import numpy as np
 from numpy.random import default_rng
-import xarray as xr
+from dask.diagnostics import ProgressBar as DaskProgressBar
 import fnmatch
 import sys
 import gc
@@ -22,6 +27,10 @@ import os
 import time as ostime
 # from scipy.interpolate import interpn
 from glob import glob
+
+import xarray as xr
+import dask.array as da
+from netCDF4 import Dataset
 import h5py
 
 try:
@@ -43,10 +52,16 @@ Nparticle = int(math.pow(2,10)) # equals to Nparticle = 1024
 # ys = 46.0  # arc degree
 # ye = 62.74  # arc degree
 
-xs = -6.25  # arc degree
-xe = 12.75  # arc degree
-ys = 50.0  # arc degree
-ye = 60.0  # arc degree
+# ------ entire ENWS ------ #
+# xs = -6.25  # arc degree
+# xe = 12.75  # arc degree
+# ys = 50.0  # arc degree
+# ye = 60.0  # arc degree
+# ------ DutchCoast ------ #
+xs = 2.5394  # arc degree
+xe = 7.2084  # arc degree
+ys = 51.262  # arc degree
+ye = 55.765  # arc degree
 
 tsteps = 0
 tstepsize = 0
@@ -210,7 +225,7 @@ def create_ENWS_fieldset(datahead, periodic_wrap, period, chunk_level=0, anisotr
             yk = (fieldset.U.lat[yi] - fieldset.U.lat[0]) / (fieldset.U.lat[1] - fieldset.U.lat[0])
             if yk < L / 2:
                 beta[yi] = yk * np.power(L - 2 * yk, 1 / alpha)
-            elif yk[yi] >= L / 2:
+            elif yk >= L / 2:
                 beta[yi] = (L - yk) * np.power(2 * yk - L, 1 / alpha)
         Kh_meridional_profile = 0.1 * (2 * (1 + alpha) * (1 + 2 * alpha)) / (alpha ** 2 * np.power(L, 1 + 1 / alpha)) * beta
         for i in range(xdim):
@@ -261,11 +276,17 @@ def sample_uv(particle, fieldset, time):
         else:
             particle.valid = 1
 
+# projectcode = "ENWS"
+# projectcode = "DutchCoast"
+# projectcode = "DutchCoast25km"
+projectcode = "DutchCoastHR"
 # ====
 # start example: python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk4' -gres 1 -t 365 -dt 600 -ot 3600
 #                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 4 -t 365 -dt 600 -ot 3600
-#                python3
+#                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 240 -t 365 -dt 600 -ot 3600
+#                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk4' -gres 48 -t 365 -dt 600 -ot 3600
 # ====
+# There are 3600 arcseconds in 1 degree
 if __name__=='__main__':
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")
     parser.add_argument("-f", "--filename", dest="filename", type=str, default="file.txt", help="(relative) (text) file path of the csv hyper parameters")
@@ -276,9 +297,11 @@ if __name__=='__main__':
     parser.add_argument("-gres", "--grid_resolution", dest="gres", type=str, default="10", help="number of cells per arc-degree or metre (default: 10)")
     parser.add_argument("-G", "--GC", dest="useGC", action='store_true', default=False, help="using a garbage collector (default: false)")
     parser.add_argument("-chs", "--chunksize", dest="chs", type=int, default=0, help="defines the chunksize level: 0=None, 1='auto', 2=fine tuned; default: 0")
+    parser.add_argument("--writeNC", dest="writeNC", action='store_true', default=False, help="write output to NetCDF (default: false)")
+    parser.add_argument("--writeH5", dest="writeH5", action='store_true', default=False, help="write output to HDF5 (default: false)")
     args = parser.parse_args()
 
-    ParticleSet = BenchmarkParticleSet
+    ParticleSet = DryParticleSet
 
     filename=args.filename
     deleteBC = True
@@ -297,6 +320,8 @@ if __name__=='__main__':
     gres = float(eval(args.gres))
     interp_mode = args.interp_mode
     compute_mode = 'jit'  # args.compute_mode
+    netcdf_write = args.writeNC
+    hdf5_write = args.writeH5
 
     dt_seconds = args.dt
     outdt_seconds = args.outdt
@@ -317,19 +342,19 @@ if __name__=='__main__':
         headdir = "/scratch/{}/experiments".format("ckehl")
         odir = headdir
         datahead = "/data/oceanparcels/input_data"
-        dirread_top = os.path.join(datahead, "ENWS")
+        dirread_top = os.path.join(datahead, projectcode)
         computer_env = "Gemini"
     elif fnmatch.fnmatchcase(os.uname()[1], "*.bullx*"):  # Cartesius
         CARTESIUS_SCRATCH_USERNAME = 'ckehluu'
         headdir = "/scratch/shared/{}/experiments".format(CARTESIUS_SCRATCH_USERNAME)
         odir = headdir
         datahead = "/projects/0/topios/hydrodynamic_data"
-        dirread_top = os.path.join(datahead, "ENWS")
+        dirread_top = os.path.join(datahead, projectcode)
         computer_env = "Cartesius"
     elif fnmatch.fnmatchcase(os.uname()[1], "PROMETHEUS"):  # Prometheus computer - use USB drive
         CARTESIUS_SCRATCH_USERNAME = 'christian'
         headdir = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
-        odir = os.path.join(headdir, "ENWS")
+        odir = os.path.join(headdir, projectcode)
         datahead = "/media/{}/DATA/data/hydrodynamics".format(CARTESIUS_SCRATCH_USERNAME)
         dirread_top = os.path.join(datahead, "ENWS")
         computer_env = "Prometheus"
@@ -338,7 +363,7 @@ if __name__=='__main__':
         odir = headdir
         dirread_pal = headdir
         datahead = "/data"
-        dirread_top = os.path.join(datahead, "ENWS")
+        dirread_top = os.path.join(datahead, projectcode)
     print("running {} on {} (uname: {}) - branch '{}' - argv: {}".format(scenario, computer_env, os.uname()[1], branch, sys.argv[1:]))
 
     if os.path.sep in filename:
@@ -366,43 +391,76 @@ if __name__=='__main__':
     centers_y = yval + step/2.0
     us = np.zeros((centers_y.shape[0], centers_x.shape[0]))
     vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+    sdx = np.zeros((centers_y.shape[0], centers_x.shape[0]))
+    sdy = np.zeros((centers_y.shape[0], centers_x.shape[0]))
     seconds_per_day = 24.0*60.0*60.0
     num_t_samples = int(np.floor((time_in_days*seconds_per_day) / outdt_seconds))
     global_fT = np.linspace(start=.0, stop=time_in_days*seconds_per_day, num=num_t_samples, endpoint=True, dtype=np.float64)
 
-    print("Sampling UV on CMEMS grid ...")
-    out_fname = "tides"
-    sample_time = 0
-    # sample_func = sample_uv
-    period = 365.0
-    fieldset = create_ENWS_fieldset(datahead=dirread_top, periodic_wrap=True, period=period, chunk_level=chs, anisotropic_diffusion=False)
-    p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
-    sample_pset = ParticleSet(fieldset=fieldset, pclass=SampleParticle, lon=np.array(p_center_x).flatten(), lat=np.array(p_center_y).flatten(), time=sample_time)
-    sample_kernel = sample_pset.Kernel(sample_uv)
+    out_fname = "flow"
     sample_outname = out_fname + "_sampleuv"
-    sample_output_file = sample_pset.ParticleFile(name=os.path.join(odir,sample_outname+".nc"), outputdt=timedelta(seconds=outdt_seconds))
-    postProcessFuncs = []
-    if with_GC:
-        postProcessFuncs = [perIterGC, ]
-    if backwardSimulation:
-        sample_pset.execute(sample_kernel, runtime=timedelta(days=time_in_days), dt=timedelta(seconds=-dt_seconds), output_file=sample_output_file, recovery={ErrorCode.ErrorOutOfBounds: DeleteParticle}, postIterationCallbacks=postProcessFuncs, callbackdt=timedelta(seconds=outdt_seconds))
+    zarr_sample_filename = os.path.join(odir, sample_outname + ".zarr")
+    nc_sample_filename = os.path.join(odir, sample_outname + ".nc")
+    p_center_y, p_center_x = None, None
+    period = 365.0
+    if(os.path.exists(zarr_sample_filename) == False) or (os.path.exists(nc_sample_filename) == False):
+        print("Sampling UV on CMEMS grid ...")
+        sample_time = 0
+        # sample_func = sample_uv
+        fieldset = create_ENWS_fieldset(datahead=dirread_top, periodic_wrap=True, period=period, chunk_level=chs, anisotropic_diffusion=False)
+        p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
+        sample_pset = ParticleSet(fieldset=fieldset, pclass=SampleParticle, lon=np.array(p_center_x).flatten(), lat=np.array(p_center_y).flatten(), time=sample_time)
+        sample_kernel = sample_pset.Kernel(sample_uv)
+        # sample_output_file = sample_pset.ParticleFile(name=nc_sample_filename, outputdt=timedelta(seconds=outdt_seconds))
+        sample_output_file = sample_pset.ParticleFile(name=zarr_sample_filename, outputdt=timedelta(seconds=outdt_seconds))
+        postProcessFuncs = []
+        if with_GC:
+            postProcessFuncs = [perIterGC, ]
+        if backwardSimulation:
+            sample_pset.execute(sample_kernel, runtime=timedelta(days=time_in_days), dt=timedelta(seconds=-dt_seconds), output_file=sample_output_file, postIterationCallbacks=postProcessFuncs, callbackdt=timedelta(seconds=outdt_seconds))
+        else:
+            sample_pset.execute(sample_kernel, runtime=timedelta(days=time_in_days), dt=timedelta(seconds=dt_seconds), output_file=sample_output_file, postIterationCallbacks=postProcessFuncs, callbackdt=timedelta(seconds=outdt_seconds))
+        # sample_output_file.close()
+        del sample_output_file
+        del sample_pset
+        del sample_kernel
+        del fieldset
+        print("UV on CMEMS grid sampled.")
     else:
-        sample_pset.execute(sample_kernel, runtime=timedelta(days=time_in_days), dt=timedelta(seconds=dt_seconds), output_file=sample_output_file, recovery={ErrorCode.ErrorOutOfBounds: DeleteParticle}, postIterationCallbacks=postProcessFuncs, callbackdt=timedelta(seconds=outdt_seconds))
-    sample_output_file.close()
-    del sample_output_file
-    del sample_pset
-    del sample_kernel
-    del fieldset
-    print("UV on CMEMS grid sampled.")
+        print("Using previously-computed zArray files in '%s'." % (zarr_sample_filename, ))
+        p_center_y, p_center_x = np.meshgrid(centers_y, centers_x, sparse=False, indexing='ij')
+
+    if(os.path.exists(nc_sample_filename) == False):
+        print("Convert zArray to NetCDF.")
+        try:
+            ds_zarr = xr.open_zarr(zarr_sample_filename, chunks=None)
+            # encoding_dict = {key: {"zlib": True, "complevel": 3} for key in ds_zarr.data_vars}
+            encoding_dict = {key: {"zlib": False} for key in ds_zarr.data_vars}
+            with DaskProgressBar():
+                ds_zarr.to_netcdf(nc_sample_filename, compute=True, encoding=encoding_dict)
+        except Exception as e:
+            ds_zarr = xr.open_zarr(zarr_sample_filename, chunks='auto')
+            # encoding_dict = {key: {"zlib": True, "complevel": 3} for key in ds_zarr.data_vars}
+            encoding_dict = {key: {"zlib": False} for key in ds_zarr.data_vars}
+            with DaskProgressBar():
+                ds_zarr.to_netcdf(nc_sample_filename, compute=True, encoding=encoding_dict)
+        print("NetCDF conversion done.")
+    else:
+        print("Using previously-computed NetCDF files in '%s'." % (nc_sample_filename,))
+        # sample_xarray = xr.open_dataset(nc_sample_filename)
+        # p_center_x = np.squeeze(sample_xarray['lon'].data[:, 0]).reshape((centers_y.shape[0], centers_x.shape[0]))
+        # p_center_y = np.squeeze(sample_xarray['lat'].data[:, 0]).reshape((centers_y.shape[0], centers_x.shape[0]))
+    print("p_center_x shape: {}; p_center_y shape: {}".format(p_center_x.shape, p_center_y.shape))
 
     print("Load sampled data ...")
-    sample_xarray = xr.open_dataset(os.path.join(odir, sample_outname + ".nc"))
+    sample_xarray = xr.open_dataset(nc_sample_filename)
     N_s = sample_xarray['lon'].shape[0]
     tN_s = sample_xarray['lon'].shape[1]
     print("N: {}, t_N: {}".format(N_s, tN_s))
     valid_array = np.maximum(np.max(np.array(sample_xarray['valid'][:, 0:2]), axis=1), 0).astype(np.bool_)
     if DBG_MSG:
         print("Valid array: any true ? {}; all true ? {}".format(valid_array.any(), valid_array.all()))
+    # this can break the procedure for very large files ...
     ctime_array_s = sample_xarray['time'].data
     time_in_min_s = np.nanmin(ctime_array_s, axis=0)
     time_in_max_s = np.nanmax(ctime_array_s, axis=0)
@@ -479,43 +537,172 @@ if __name__=='__main__':
         # vs = np.zeros((centers_y.shape[0], centers_x.shape[0]))
     # ==== end time interpolation ==== #
 
-
-
-    grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
-    grid_lon_ds = grid_file.create_dataset("longitude", data=centers_x, compression="gzip", compression_opts=4)
-    grid_lon_ds.attrs['unit'] = "arc degree"
-    grid_lon_ds.attrs['name'] = 'longitude'
-    grid_lon_ds.attrs['min'] = centers_x.min()
-    grid_lon_ds.attrs['max'] = centers_x.max()
-    grid_lat_ds = grid_file.create_dataset("latitude", data=centers_y, compression="gzip", compression_opts=4)
-    grid_lat_ds.attrs['unit'] = "arc degree"
-    grid_lat_ds.attrs['name'] = 'latitude'
-    grid_lat_ds.attrs['min'] = centers_y.min()
-    grid_lat_ds.attrs['max'] = centers_y.max()
-    grid_time_ds = grid_file.create_dataset("times", data=iT, compression="gzip", compression_opts=4)
-    grid_time_ds.attrs['unit'] = "seconds"
-    grid_time_ds.attrs['name'] = 'time'
-    grid_time_ds.attrs['min'] = np.nanmin(iT)
-    grid_time_ds.attrs['max'] = np.nanmax(iT)
-    grid_file.close()
+    if hdf5_write:
+        grid_file = h5py.File(os.path.join(odir, "grid.h5"), "w")
+        grid_lon_ds = grid_file.create_dataset("longitude", data=centers_x, compression="gzip", compression_opts=4)
+        grid_lon_ds.attrs['unit'] = "arc degree"
+        grid_lon_ds.attrs['name'] = 'longitude'
+        grid_lon_ds.attrs['min'] = centers_x.min()
+        grid_lon_ds.attrs['max'] = centers_x.max()
+        grid_lat_ds = grid_file.create_dataset("latitude", data=centers_y, compression="gzip", compression_opts=4)
+        grid_lat_ds.attrs['unit'] = "arc degree"
+        grid_lat_ds.attrs['name'] = 'latitude'
+        grid_lat_ds.attrs['min'] = centers_y.min()
+        grid_lat_ds.attrs['max'] = centers_y.max()
+        grid_time_ds = grid_file.create_dataset("times", data=iT, compression="gzip", compression_opts=4)
+        grid_time_ds.attrs['unit'] = "seconds"
+        grid_time_ds.attrs['name'] = 'time'
+        grid_time_ds.attrs['min'] = np.nanmin(iT)
+        grid_time_ds.attrs['max'] = np.nanmax(iT)
+        grid_file.close()
 
     us_minmax = [0., 0.]
     us_statistics = [0., 0.]
     us_file, us_file_ds = None, None
+    us_nc_file, us_nc_tdim, us_nc_ydim, us_nc_xdim, us_nc_uvel = None, None, None, None, None
+    us_nc_tvar, us_nc_yvar, us_nc_xvar = None, None, None
     if not interpolate_particles:
-        us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
-        us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(iT.shape[0], us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
-        us_file_ds.attrs['unit'] = "m/s"
-        us_file_ds.attrs['name'] = 'meridional_velocity'
+        if hdf5_write:
+            us_file = h5py.File(os.path.join(odir, "hydrodynamic_U.h5"), "w")
+            us_file_ds = us_file.create_dataset("uo",
+                                                shape=(1, us.shape[0], us.shape[1]),
+                                                maxshape=(iT.shape[0], us.shape[0], us.shape[1]),
+                                                dtype=us.dtype,
+                                                compression="gzip", compression_opts=4)
+            us_file_ds.attrs['unit'] = "m/s"
+            us_file_ds.attrs['name'] = 'meridional_velocity'
+        if netcdf_write:
+            us_nc_file = Dataset(os.path.join(odir, "hydrodynamic_U.nc"), mode='w', format='NETCDF4_CLASSIC')
+            us_nc_xdim = us_nc_file.createDimension('lon', us.shape[1])
+            us_nc_ydim = us_nc_file.createDimension('lat', us.shape[0])
+            us_nc_tdim = us_nc_file.createDimension('time', None)
+            us_nc_xvar = us_nc_file.createVariable('lon', np.float32, ('lon', ))
+            us_nc_yvar = us_nc_file.createVariable('lat', np.float32, ('lat', ))
+            us_nc_tvar = us_nc_file.createVariable('time', np.float32, ('time', ))
+            us_nc_file.title = "hydrodynamic-2D-U"
+            us_nc_file.subtitle = "365d-daily"
+            us_nc_xvar.units = "arcdegree_eastwards"
+            us_nc_xvar.long_name = "longitude"
+            us_nc_yvar.units = "arcdegree_northwards"
+            us_nc_yvar.long_name = "latitude"
+            us_nc_tvar.units = "seconds"
+            us_nc_tvar.long_name = "time"
+            us_nc_xvar[:] = centers_x
+            us_nc_yvar[:] = centers_y
+            us_nc_uvel = us_nc_file.createVariable('u', np.float32, ('time', 'lat', 'lon'))
+            us_nc_uvel.units = "m/s"
+            us_nc_uvel.standard_name = "eastwards longitudinal zonal velocity"
 
     vs_minmax = [0., 0.]
     vs_statistics = [0., 0.]
     vs_file, vs_file_ds = None, None
+    vs_nc_file, vs_nc_tdim, vs_nc_ydim, vs_nc_xdim, vs_nc_vvel = None, None, None, None, None
+    vs_nc_tvar, vs_nc_yvar, vs_nc_xvar = None, None, None
     if not interpolate_particles:
-        vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
-        vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(iT.shape[0], vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
-        vs_file_ds.attrs['unit'] = "m/s"
-        vs_file_ds.attrs['name'] = 'zonal_velocity'
+        if hdf5_write:
+            vs_file = h5py.File(os.path.join(odir, "hydrodynamic_V.h5"), "w")
+            vs_file_ds = vs_file.create_dataset("vo",
+                                                shape=(1, vs.shape[0], vs.shape[1]),
+                                                maxshape=(iT.shape[0], vs.shape[0], vs.shape[1]),
+                                                dtype=vs.dtype,
+                                                compression="gzip", compression_opts=4)
+            vs_file_ds.attrs['unit'] = "m/s"
+            vs_file_ds.attrs['name'] = 'zonal_velocity'
+        if netcdf_write:
+            vs_nc_file = Dataset(os.path.join(odir, "hydrodynamic_V.nc"), mode='w', format='NETCDF4_CLASSIC')
+            vs_nc_xdim = vs_nc_file.createDimension('lon', vs.shape[1])
+            vs_nc_ydim = vs_nc_file.createDimension('lat', vs.shape[0])
+            vs_nc_tdim = vs_nc_file.createDimension('time', None)
+            vs_nc_xvar = vs_nc_file.createVariable('lon', np.float32, ('lon', ))
+            vs_nc_yvar = vs_nc_file.createVariable('lat', np.float32, ('lat', ))
+            vs_nc_tvar = vs_nc_file.createVariable('time', np.float32, ('time', ))
+            vs_nc_file.title = "hydrodynamic-2D-V"
+            vs_nc_file.subtitle = "365d-daily"
+            vs_nc_xvar.units = "arcdegree_eastwards"
+            vs_nc_xvar.long_name = "longitude"
+            vs_nc_yvar.units = "arcdegree_northwards"
+            vs_nc_yvar.long_name = "latitude"
+            vs_nc_tvar.units = "seconds"
+            vs_nc_tvar.long_name = "time"
+            vs_nc_xvar[:] = centers_x
+            vs_nc_yvar[:] = centers_y
+            vs_nc_vvel = vs_nc_file.createVariable('v', np.float32, ('time', 'lat', 'lon'))
+            vs_nc_vvel.units = "m/s"
+            vs_nc_vvel.standard_name = "northwards latitudinal meridional velocity"
+
+    sdx_minmax = [0., 0.]
+    sdx_statistics = [0., 0.]
+    sdx_file, sdx_file_ds = None, None
+    sdx_nc_file, sdx_nc_tdim, sdx_nc_ydim, sdx_nc_xdim, sdx_nc_xvel = None, None, None, None, None
+    sdx_nc_tvar, sdx_nc_yvar, sdx_nc_xvar = None, None, None
+    if not interpolate_particles:
+        if hdf5_write:
+            sdx_file = h5py.File(os.path.join(odir, "hydrodynamic_SDX.h5"), "w")
+            sdx_file_ds = sdx_file.create_dataset("SDX",
+                                                  shape=(1, sdx.shape[0], sdx.shape[1]),
+                                                  maxshape=(iT.shape[0], sdx.shape[0], sdx.shape[1]),
+                                                  dtype=sdx.dtype,
+                                                  compression="gzip", compression_opts=4)
+            sdx_file_ds.attrs['unit'] = "m/s"
+            sdx_file_ds.attrs['name'] = 'meridional_velocity'
+        if netcdf_write:
+            sdx_nc_file = Dataset(os.path.join(odir, "hydrodynamic_SDX.nc"), mode='w', format='NETCDF4_CLASSIC')
+            sdx_nc_xdim = sdx_nc_file.createDimension('lon', sdx.shape[1])
+            sdx_nc_ydim = sdx_nc_file.createDimension('lat', sdx.shape[0])
+            sdx_nc_tdim = sdx_nc_file.createDimension('time', None)
+            sdx_nc_xvar = sdx_nc_file.createVariable('lon', np.float32, ('lon', ))
+            sdx_nc_yvar = sdx_nc_file.createVariable('lat', np.float32, ('lat', ))
+            sdx_nc_tvar = sdx_nc_file.createVariable('time', np.float32, ('time', ))
+            sdx_nc_file.title = "hydrodynamic-2D-SDX"
+            sdx_nc_file.subtitle = "365d-daily"
+            sdx_nc_xvar.units = "arcdegree_eastwards"
+            sdx_nc_xvar.long_name = "longitude"
+            sdx_nc_yvar.units = "arcdegree_northwards"
+            sdx_nc_yvar.long_name = "latitude"
+            sdx_nc_tvar.units = "seconds"
+            sdx_nc_tvar.long_name = "time"
+            sdx_nc_xvar[:] = centers_x
+            sdx_nc_yvar[:] = centers_y
+            sdx_nc_xvel = sdx_nc_file.createVariable('SDX', np.float32, ('time', 'lat', 'lon'))
+            sdx_nc_xvel.units = "m/s"
+            sdx_nc_xvel.standard_name = "eastwards longitudinal zonal stokes-drift velocity"
+
+    sdy_minmax = [0., 0.]
+    sdy_statistics = [0., 0.]
+    sdy_file, sdy_file_ds = None, None
+    sdy_nc_file, sdy_nc_tdim, sdy_nc_ydim, sdy_nc_xdim, sdy_nc_yvel = None, None, None, None, None
+    sdy_nc_tvar, sdy_nc_yvar, sdy_nc_xvar = None, None, None
+    if not interpolate_particles:
+        if hdf5_write:
+            sdy_file = h5py.File(os.path.join(odir, "hydrodynamic_SDY.h5"), "w")
+            sdy_file_ds = sdy_file.create_dataset("SDY",
+                                                  shape=(1, sdy.shape[0], sdy.shape[1]),
+                                                  maxshape=(iT.shape[0], sdy.shape[0], sdy.shape[1]),
+                                                  dtype=sdy.dtype,
+                                                  compression="gzip", compression_opts=4)
+            sdy_file_ds.attrs['unit'] = "m/s"
+            sdy_file_ds.attrs['name'] = 'zonal_velocity'
+        if netcdf_write:
+            sdy_nc_file = Dataset(os.path.join(odir, "hydrodynamic_SDY.nc"), mode='w', format='NETCDF4_CLASSIC')
+            sdy_nc_xdim = sdy_nc_file.createDimension('lon', sdy.shape[1])
+            sdy_nc_ydim = sdy_nc_file.createDimension('lat', sdy.shape[0])
+            sdy_nc_tdim = sdy_nc_file.createDimension('time', None)
+            sdy_nc_xvar = sdy_nc_file.createVariable('lon', np.float32, ('lon', ))
+            sdy_nc_yvar = sdy_nc_file.createVariable('lat', np.float32, ('lat', ))
+            sdy_nc_tvar = sdy_nc_file.createVariable('time', np.float32, ('time', ))
+            sdy_nc_file.title = "hydrodynamic-2D-SDY"
+            sdy_nc_file.subtitle = "365d-daily"
+            sdy_nc_xvar.units = "arcdegree_eastwards"
+            sdy_nc_xvar.long_name = "longitude"
+            sdy_nc_yvar.units = "arcdegree_northwards"
+            sdy_nc_yvar.long_name = "latitude"
+            sdy_nc_tvar.units = "seconds"
+            sdy_nc_tvar.long_name = "time"
+            sdy_nc_xvar[:] = centers_x
+            sdy_nc_yvar[:] = centers_y
+            sdy_nc_yvel = sdy_nc_file.createVariable('SDY', np.float32, ('time', 'lat', 'lon'))
+            sdy_nc_yvel.units = "m/s"
+            sdy_nc_yvel.standard_name = "northwards latitudinal meridional stokes-drift velocity"
 
     print("Interpolating UV on a regular-square grid ...")
     # total_items = psT.shape[1]
@@ -526,23 +713,149 @@ if __name__=='__main__':
             # ==== ==== create files ==== ==== #
             us_minmax = [0., 0.]
             us_statistics = [0., 0.]
-            u_filename = "hydrodynamic_U_d%d.h5" % (ti, )
-            us_file = h5py.File(os.path.join(odir, u_filename), "w")
-            us_file_ds = us_file.create_dataset("uo", shape=(1, us.shape[0], us.shape[1]), dtype=us.dtype, maxshape=(1, us.shape[0], us.shape[1]), compression="gzip", compression_opts=4)
-            us_file_ds.attrs['unit'] = "m/s"
-            us_file_ds.attrs['time'] = current_time
-            us_file_ds.attrs['time_unit'] = "s"
-            us_file_ds.attrs['name'] = 'meridional_velocity'
+            if hdf5_write:
+                u_filename = "hydrodynamic_U_d%d.h5" % (ti, )
+                us_file = h5py.File(os.path.join(odir, u_filename), "w")
+                us_file_ds = us_file.create_dataset("uo",
+                                                    shape=(1, us.shape[0], us.shape[1]),
+                                                    maxshape=(1, us.shape[0], us.shape[1]),
+                                                    dtype=us.dtype,
+                                                    compression="gzip", compression_opts=4)
+                us_file_ds.attrs['unit'] = "m/s"
+                us_file_ds.attrs['time'] = current_time
+                us_file_ds.attrs['time_unit'] = "s"
+                us_file_ds.attrs['name'] = 'meridional_velocity'
+            if netcdf_write:
+                u_filename = "hydrodynamic_U_d%d.nc" % (ti, )
+                us_nc_file = Dataset(os.path.join(odir, u_filename), mode='w', format='NETCDF4_CLASSIC')
+                us_nc_xdim = us_nc_file.createDimension('lon', us.shape[1])
+                us_nc_ydim = us_nc_file.createDimension('lat', us.shape[0])
+                us_nc_tdim = us_nc_file.createDimension('time', 1)
+                us_nc_xvar = us_nc_file.createVariable('lon', np.float32, ('lon', ))
+                us_nc_yvar = us_nc_file.createVariable('lat', np.float32, ('lat', ))
+                us_nc_tvar = us_nc_file.createVariable('time', np.float32, ('time', ))
+                us_nc_file.title = "hydrodynamic-2D-U"
+                us_nc_file.subtitle = "365d-daily"
+                us_nc_xvar.units = "arcdegree_eastwards"
+                us_nc_xvar.long_name = "longitude"
+                us_nc_yvar.units = "arcdegree_northwards"
+                us_nc_yvar.long_name = "latitude"
+                us_nc_tvar.units = "seconds"
+                us_nc_tvar.long_name = "time"
+                us_nc_xvar[:] = centers_x
+                us_nc_yvar[:] = centers_y
+                us_nc_uvel = us_nc_file.createVariable('u', np.float32, ('time', 'lat', 'lon'))
+                us_nc_uvel.units = "m/s"
+                us_nc_uvel.standard_name = "eastwards longitudinal zonal velocity"
 
             vs_minmax = [0., 0.]
             vs_statistics = [0., 0.]
-            v_filename = "hydrodynamic_V_d%d.h5" %(ti, )
-            vs_file = h5py.File(os.path.join(odir, v_filename), "w")
-            vs_file_ds = vs_file.create_dataset("vo", shape=(1, vs.shape[0], vs.shape[1]), dtype=vs.dtype, maxshape=(1, vs.shape[0], vs.shape[1]), compression="gzip", compression_opts=4)
-            vs_file_ds.attrs['unit'] = "m/s"
-            vs_file_ds.attrs['time'] = current_time
-            vs_file_ds.attrs['time_unit'] = "s"
-            vs_file_ds.attrs['name'] = 'zonal_velocity'
+            if hdf5_write:
+                v_filename = "hydrodynamic_V_d%d.h5" %(ti, )
+                vs_file = h5py.File(os.path.join(odir, v_filename), "w")
+                vs_file_ds = vs_file.create_dataset("vo",
+                                                    shape=(1, vs.shape[0], vs.shape[1]),
+                                                    maxshape=(1, vs.shape[0], vs.shape[1]),
+                                                    dtype=vs.dtype,
+                                                    compression="gzip", compression_opts=4)
+                vs_file_ds.attrs['unit'] = "m/s"
+                vs_file_ds.attrs['time'] = current_time
+                vs_file_ds.attrs['time_unit'] = "s"
+                vs_file_ds.attrs['name'] = 'zonal_velocity'
+            if netcdf_write:
+                v_filename = "hydrodynamic_V_d%d.nc" % (ti, )
+                vs_nc_file = Dataset(os.path.join(odir, v_filename), mode='w', format='NETCDF4_CLASSIC')
+                vs_nc_xdim = vs_nc_file.createDimension('lon', vs.shape[1])
+                vs_nc_ydim = vs_nc_file.createDimension('lat', vs.shape[0])
+                vs_nc_tdim = vs_nc_file.createDimension('time', 1)
+                vs_nc_xvar = vs_nc_file.createVariable('lon', np.float32, ('lon', ))
+                vs_nc_yvar = vs_nc_file.createVariable('lat', np.float32, ('lat', ))
+                vs_nc_tvar = vs_nc_file.createVariable('time', np.float32, ('time', ))
+                vs_nc_file.title = "hydrodynamic-2D-V"
+                vs_nc_file.subtitle = "365d-daily"
+                vs_nc_xvar.units = "arcdegree_eastwards"
+                vs_nc_xvar.long_name = "longitude"
+                vs_nc_yvar.units = "arcdegree_northwards"
+                vs_nc_yvar.long_name = "latitude"
+                vs_nc_tvar.units = "seconds"
+                vs_nc_tvar.long_name = "time"
+                vs_nc_xvar[:] = centers_x
+                vs_nc_yvar[:] = centers_y
+                vs_nc_vvel = vs_nc_file.createVariable('v', np.float32, ('time', 'lat', 'lon'))
+                vs_nc_vvel.units = "m/s"
+                vs_nc_vvel.standard_name = "northwards latitudinal meridional velocity"
+
+            sdx_minmax = [0., 0.]
+            sdx_statistics = [0., 0.]
+            if hdf5_write:
+                sdx_filename = "hydrodynamic_SDX_d%d.h5" % (ti, )
+                sdx_file = h5py.File(os.path.join(odir, sdx_filename), "w")
+                sdx_file_ds = sdx_file.create_dataset("SDX",
+                                                      shape=(1, us.shape[0], us.shape[1]),
+                                                      maxshape=(1, us.shape[0], us.shape[1]),
+                                                      dtype=us.dtype,
+                                                      compression="gzip", compression_opts=4)
+                sdx_file_ds.attrs['unit'] = "m/s"
+                sdx_file_ds.attrs['time'] = current_time
+                sdx_file_ds.attrs['time_unit'] = "s"
+                sdx_file_ds.attrs['name'] = 'meridional_stokes-drift_velocity'
+            if netcdf_write:
+                sdx_nc_file = Dataset(os.path.join(odir, "hydrodynamic_SDX.nc"), mode='w', format='NETCDF4_CLASSIC')
+                sdx_nc_xdim = sdx_nc_file.createDimension('lon', sdx.shape[1])
+                sdx_nc_ydim = sdx_nc_file.createDimension('lat', sdx.shape[0])
+                sdx_nc_tdim = sdx_nc_file.createDimension('time', 1)
+                sdx_nc_xvar = sdx_nc_file.createVariable('lon', np.float32, ('lon', ))
+                sdx_nc_yvar = sdx_nc_file.createVariable('lat', np.float32, ('lat', ))
+                sdx_nc_tvar = sdx_nc_file.createVariable('time', np.float32, ('time', ))
+                sdx_nc_file.title = "hydrodynamic-2D-SDX"
+                sdx_nc_file.subtitle = "365d-daily"
+                sdx_nc_xvar.units = "arcdegree_eastwards"
+                sdx_nc_xvar.long_name = "longitude"
+                sdx_nc_yvar.units = "arcdegree_northwards"
+                sdx_nc_yvar.long_name = "latitude"
+                sdx_nc_tvar.units = "seconds"
+                sdx_nc_tvar.long_name = "time"
+                sdx_nc_xvar[:] = centers_x
+                sdx_nc_yvar[:] = centers_y
+                sdx_nc_xvel = sdx_nc_file.createVariable('SDX', np.float32, ('time', 'lat', 'lon'))
+                sdx_nc_xvel.units = "m/s"
+                sdx_nc_xvel.standard_name = "eastwards longitudinal zonal stokes-drift velocity"
+
+            sdy_minmax = [0., 0.]
+            sdy_statistics = [0., 0.]
+            if hdf5_write:
+                sdy_filename = "hydrodynamic_SDY_d%d.h5" %(ti, )
+                sdy_file = h5py.File(os.path.join(odir, sdy_filename), "w")
+                sdy_file_ds = sdy_file.create_dataset("SDY",
+                                                      shape=(1, vs.shape[0], vs.shape[1]),
+                                                      maxshape=(1, vs.shape[0], vs.shape[1]),
+                                                      dtype=vs.dtype,
+                                                      compression="gzip", compression_opts=4)
+                sdy_file_ds.attrs['unit'] = "m/s"
+                sdy_file_ds.attrs['time'] = current_time
+                sdy_file_ds.attrs['time_unit'] = "s"
+                sdy_file_ds.attrs['name'] = 'zonal_stokes-drift_velocity'
+            if netcdf_write:
+                sdy_nc_file = Dataset(os.path.join(odir, "hydrodynamic_SDY.nc"), mode='w', format='NETCDF4_CLASSIC')
+                sdy_nc_xdim = sdy_nc_file.createDimension('lon', sdy.shape[1])
+                sdy_nc_ydim = sdy_nc_file.createDimension('lat', sdy.shape[0])
+                sdy_nc_tdim = sdy_nc_file.createDimension('time', 1)
+                sdy_nc_xvar = sdy_nc_file.createVariable('lon', np.float32, ('lon', ))
+                sdy_nc_yvar = sdy_nc_file.createVariable('lat', np.float32, ('lat', ))
+                sdy_nc_tvar = sdy_nc_file.createVariable('time', np.float32, ('time', ))
+                sdy_nc_file.title = "hydrodynamic-2D-SDY"
+                sdy_nc_file.subtitle = "365d-daily"
+                sdy_nc_xvar.units = "arcdegree_eastwards"
+                sdy_nc_xvar.long_name = "longitude"
+                sdy_nc_yvar.units = "arcdegree_northwards"
+                sdy_nc_yvar.long_name = "latitude"
+                sdy_nc_tvar.units = "seconds"
+                sdy_nc_tvar.long_name = "time"
+                sdy_nc_xvar[:] = centers_x
+                sdy_nc_yvar[:] = centers_y
+                sdy_nc_yvel = sdy_nc_file.createVariable('SDY', np.float32, ('time', 'lat', 'lon'))
+                sdy_nc_yvel.units = "m/s"
+                sdy_nc_yvel.standard_name = "northwards latitudinal meridional stokes-drift velocity"
             # ==== === files created. === ==== #
 
         if interpolate_particles:
@@ -566,32 +879,51 @@ if __name__=='__main__':
             # psV_ti1 = np.array(psV[:, p_ti1])
             # psVw_ti0 = np.array(psVw[:, p_ti0])
             # psVw_ti1 = np.array(psVw[:, p_ti1])
-            us_local = np.squeeze(np.array((1.0-p_tt) * (psU[:, p_ti0] + psUw[:, p_ti0]) + p_tt * (psU[:, p_ti1] + psUw[:, p_ti1])))
+            #==================================== #
+            # us_local = np.squeeze(np.array((1.0-p_tt) * (psU[:, p_ti0] + psUw[:, p_ti0]) + p_tt * (psU[:, p_ti1] + psUw[:, p_ti1])))
+            us_local = np.squeeze(np.array((1.0 - p_tt) * (psU[:, p_ti0]) + p_tt * (psU[:, p_ti1])))
+            sdx_local = np.squeeze(np.array((1.0 - p_tt) * (psUw[:, p_ti0]) + p_tt * (psUw[:, p_ti1])))
             if DBG_MSG:
                 print("us_local (after creation): {}".format(us_local.shape))
             us_local = np.expand_dims(us_local, axis=1)
+            sdx_local = np.expand_dims(sdx_local, axis=1)
             if DBG_MSG:
                 print("us_local (after dim-extension): {}".format(us_local.shape))
             # us_local = np.reshape(us_local, (N_s, 1))  # us_local[:, np.newaxis]  # np.expand_dims(us_local, axis=1)
             # if DBG_MSG:
             #     print("us_local (after reshape): {}".format(us_local.shape))
             us_local[~mask_array_s, :] = 0
+            sdx_local[~mask_array_s, :] = 0
             if DBG_MSG:
                 print("us_local (after trimming): {}".format(us_local.shape))
-            vs_local = np.squeeze(np.array((1.0-p_tt) * (psV[:, p_ti0] + psVw[:, p_ti0]) + p_tt * (psV[:, p_ti1] + psVw[:, p_ti1])))
+            # vs_local = np.squeeze(np.array((1.0-p_tt) * (psV[:, p_ti0] + psVw[:, p_ti0]) + p_tt * (psV[:, p_ti1] + psVw[:, p_ti1])))
+            vs_local = np.squeeze(np.array((1.0 - p_tt) * (psV[:, p_ti0]) + p_tt * (psV[:, p_ti1])))
+            sdy_local = np.squeeze(np.array((1.0 - p_tt) * (psVw[:, p_ti0]) + p_tt * (psVw[:, p_ti1])))
             vs_local = np.expand_dims(vs_local, axis=1)
+            sdy_local = np.expand_dims(sdy_local, axis=1)
             # vs_local = np.reshape(vs_local, (N_s, 1))  # vs_local[:, np.newaxis]  # np.expand_dims(vs_local, axis=1)
             vs_local[~mask_array_s, :] = 0
+            sdy_local[~mask_array_s, :] = 0
         else:
-            us_local = np.expand_dims(psU[:, ti]+psUw[:, ti], axis=1)
+            # us_local = np.expand_dims(psU[:, ti]+psUw[:, ti], axis=1)
+            # us_local[~mask_array_s, :] = 0
+            # vs_local = np.expand_dims(psV[:, ti]+psVw[:, ti], axis=1)
+            # vs_local[~mask_array_s, :] = 0
+            us_local = np.expand_dims(psU[:, ti], axis=1)
             us_local[~mask_array_s, :] = 0
-            vs_local = np.expand_dims(psV[:, ti]+psVw[:, ti], axis=1)
+            vs_local = np.expand_dims(psV[:, ti], axis=1)
             vs_local[~mask_array_s, :] = 0
+            sdx_local = np.expand_dims(psUw[:, ti], axis=1)
+            sdx_local[~mask_array_s, :] = 0
+            sdy_local = np.expand_dims(psVw[:, ti], axis=1)
+            sdy_local[~mask_array_s, :] = 0
         if ti == 0 and DBG_MSG:
             print("us.shape {}; us_local.shape: {}; psU.shape: {}; p_center_y.shape: {}".format(us.shape, us_local.shape, psU.shape, p_center_y.shape))
 
         us[:, :] = np.reshape(us_local, p_center_y.shape)
         vs[:, :] = np.reshape(vs_local, p_center_y.shape)
+        sdx[:, :] = np.reshape(sdx_local, p_center_y.shape)
+        sdy[:, :] = np.reshape(sdy_local, p_center_y.shape)
 
         us_minmax = [min(us_minmax[0], us.min()), max(us_minmax[1], us.max())]
         us_statistics[0] += us.mean()
@@ -599,47 +931,115 @@ if __name__=='__main__':
         vs_minmax = [min(vs_minmax[0], vs.min()), max(vs_minmax[1], vs.max())]
         vs_statistics[0] += vs.mean()
         vs_statistics[1] += vs.std()
+        sdx_minmax = [min(sdx_minmax[0], sdx.min()), max(sdx_minmax[1], sdx.max())]
+        sdx_statistics[0] += sdx.mean()
+        sdx_statistics[1] += sdx.std()
+        sdy_minmax = [min(sdy_minmax[0], sdy.min()), max(sdy_minmax[1], sdy.max())]
+        sdy_statistics[0] += sdy.mean()
+        sdy_statistics[1] += sdy.std()
         if not interpolate_particles:
-            us_file_ds.resize((ti+1), axis=0)
-            us_file_ds[ti, :, :] = us
-            vs_file_ds.resize((ti+1), axis=0)
-            vs_file_ds[ti, :, :] = vs
+            if hdf5_write:
+                us_file_ds.resize((ti+1), axis=0)
+                us_file_ds[ti, :, :] = us
+                vs_file_ds.resize((ti+1), axis=0)
+                vs_file_ds[ti, :, :] = vs
+                sdx_file_ds.resize((ti+1), axis=0)
+                sdx_file_ds[ti, :, :] = sdx
+                sdy_file_ds.resize((ti+1), axis=0)
+                sdy_file_ds[ti, :, :] = sdy
+            if netcdf_write:
+                us_nc_uvel[ti, :, :] = us
+                vs_nc_vvel[ti, :, :] = vs
+                sdx_nc_xvel[ti, :, :] = sdx
+                sdy_nc_yvel[ti, :, :] = sdy
         else:
-            us_file_ds[0, :, :] = us
-            vs_file_ds[0, :, :] = vs
+            if hdf5_write:
+                us_file_ds[0, :, :] = us
+                vs_file_ds[0, :, :] = vs
+                sdx_file_ds[0, :, :] = sdx
+                sdy_file_ds[0, :, :] = sdy
+            if netcdf_write:
+                us_nc_uvel[0, :, :] = us
+                vs_nc_vvel[0, :, :] = vs
+                sdx_nc_xvel[0, :, :] = sdx
+                sdy_nc_yvel[0, :, :] = sdy
 
         if interpolate_particles:
-            us_file_ds.attrs['min'] = us_minmax[0]
-            us_file_ds.attrs['max'] = us_minmax[1]
-            us_file_ds.attrs['mean'] = us_statistics[0]
-            us_file_ds.attrs['std'] = us_statistics[1]
-            us_file.close()
-            vs_file_ds.attrs['min'] = vs_minmax[0]
-            vs_file_ds.attrs['max'] = vs_minmax[1]
-            vs_file_ds.attrs['mean'] = vs_statistics[0]
-            vs_file_ds.attrs['std'] = vs_statistics[1]
-            vs_file.close()
+            if hdf5_write:
+                us_file_ds.attrs['min'] = us_minmax[0]
+                us_file_ds.attrs['max'] = us_minmax[1]
+                us_file_ds.attrs['mean'] = us_statistics[0]
+                us_file_ds.attrs['std'] = us_statistics[1]
+                us_file.close()
+                vs_file_ds.attrs['min'] = vs_minmax[0]
+                vs_file_ds.attrs['max'] = vs_minmax[1]
+                vs_file_ds.attrs['mean'] = vs_statistics[0]
+                vs_file_ds.attrs['std'] = vs_statistics[1]
+                vs_file.close()
+                sdx_file_ds.attrs['min'] = sdx_minmax[0]
+                sdx_file_ds.attrs['max'] = sdx_minmax[1]
+                sdx_file_ds.attrs['mean'] = sdx_statistics[0]
+                sdx_file_ds.attrs['std'] = sdx_statistics[1]
+                sdx_file.close()
+                sdy_file_ds.attrs['min'] = sdy_minmax[0]
+                sdy_file_ds.attrs['max'] = sdy_minmax[1]
+                sdy_file_ds.attrs['mean'] = sdy_statistics[0]
+                sdy_file_ds.attrs['std'] = sdy_statistics[1]
+                sdy_file.close()
+            if netcdf_write:
+                us_nc_tvar[0] = current_time
+                us_nc_file.close()
+                vs_nc_tvar[0] = current_time
+                vs_nc_file.close()
+                sdx_nc_tvar[0] = current_time
+                sdx_nc_file.close()
+                sdy_nc_tvar[0] = current_time
+                sdy_nc_file.close()
 
         # del us_local
         # del vs_local
+        # del sdx_local
+        # del sdy_local
         us_local = None
         vs_local = None
+        sdx_local = None
+        sdy_local = None
         current_item = ti
         workdone = current_item / total_items
         print("\rProgress: [{0:50s}] {1:.1f}%".format('#' * int(workdone * 50), workdone * 100), end="", flush=True)
     print("\nFinished UV-interpolation.")
 
     if not interpolate_particles:
-        us_file_ds.attrs['min'] = us_minmax[0]
-        us_file_ds.attrs['max'] = us_minmax[1]
-        us_file_ds.attrs['mean'] = us_statistics[0] / float(iT.shape[0])
-        us_file_ds.attrs['std'] = us_statistics[1] / float(iT.shape[0])
-        us_file.close()
-        vs_file_ds.attrs['min'] = vs_minmax[0]
-        vs_file_ds.attrs['max'] = vs_minmax[1]
-        vs_file_ds.attrs['mean'] = vs_statistics[0] / float(iT.shape[0])
-        vs_file_ds.attrs['std'] = vs_statistics[1] / float(iT.shape[0])
-        vs_file.close()
+        if hdf5_write:
+            us_file_ds.attrs['min'] = us_minmax[0]
+            us_file_ds.attrs['max'] = us_minmax[1]
+            us_file_ds.attrs['mean'] = us_statistics[0] / float(iT.shape[0])
+            us_file_ds.attrs['std'] = us_statistics[1] / float(iT.shape[0])
+            us_file.close()
+            vs_file_ds.attrs['min'] = vs_minmax[0]
+            vs_file_ds.attrs['max'] = vs_minmax[1]
+            vs_file_ds.attrs['mean'] = vs_statistics[0] / float(iT.shape[0])
+            vs_file_ds.attrs['std'] = vs_statistics[1] / float(iT.shape[0])
+            vs_file.close()
+            sdx_file_ds.attrs['min'] = sdx_minmax[0]
+            sdx_file_ds.attrs['max'] = sdx_minmax[1]
+            sdx_file_ds.attrs['mean'] = sdx_statistics[0] / float(iT.shape[0])
+            sdx_file_ds.attrs['std'] = sdx_statistics[1] / float(iT.shape[0])
+            sdx_file.close()
+            sdy_file_ds.attrs['min'] = sdy_minmax[0]
+            sdy_file_ds.attrs['max'] = sdy_minmax[1]
+            sdy_file_ds.attrs['mean'] = sdy_statistics[0] / float(iT.shape[0])
+            sdy_file_ds.attrs['std'] = sdy_statistics[1] / float(iT.shape[0])
+            sdy_file.close()
+        if netcdf_write:
+            us_nc_tvar[:] = iT[0]
+            vs_nc_tvar[:] = iT[0]
+            sdx_nc_tvar[:] = iT[0]
+            sdy_nc_tvar[:] = iT[0]
+            us_nc_file.close()
+            vs_nc_file.close()
+            sdx_nc_file.close()
+            sdy_nc_file.close()
 
     del centers_x
     del centers_y
