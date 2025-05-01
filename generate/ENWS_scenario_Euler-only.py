@@ -4,7 +4,7 @@ Date: 11-02-2020
 """
 
 from parcels import AdvectionEE, AdvectionRK45, AdvectionRK4, AdvectionDiffusionEM, AdvectionDiffusionM1, DiffusionUniformKh
-from parcels import FieldSet, ScipyParticle, JITParticle, Variable, AdvectionRK4
+from parcels import FieldSet, ScipyParticle, JITParticle, Variable
 try:
     from parcels import StateCode, OperationCode, ErrorCode
 except:
@@ -283,7 +283,7 @@ projectcode = "DutchCoastHR"
 # ====
 # start example: python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk4' -gres 1 -t 365 -dt 600 -ot 3600
 #                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 4 -t 365 -dt 600 -ot 3600
-#                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 240 -t 365 -dt 600 -ot 3600
+#                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk45' -gres 32 -t 365 -dt 600 -ot 3600
 #                python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'rk4' -gres 48 -t 365 -dt 600 -ot 3600
 # ====
 # There are 3600 arcseconds in 1 degree
