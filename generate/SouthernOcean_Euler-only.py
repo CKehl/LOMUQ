@@ -348,6 +348,7 @@ projectcode = "SouthernOcean"
 #                python3 SouthernOcean_Euler-only.py -f metadata.txt -im 'ee' -gres 6 -t 366 -dt 1800 -ot 3600 -chs 2 --convert_chunk --writeNC --writeH5
 #                python3 SouthernOcean_Euler-only.py -f metadata.txt -im 'ee' -gres 12 -t 366 -dt 1800 -ot 3600 -chs 2 --convert_chunk --writeNC --writeH5
 #                python3 SouthernOcean_Euler-only.py -f metadata.txt -im 'ee' -gres 48 -t 366 -dt 1350 -ot 3600
+#                python3 SouthernOcean_Euler-only.py -f metadata.txt -im 'ee' -gres 6 -zsteps 25 -t 366 -dt 1800 -ot 3600 -chs 0 --convert_chunk --writeNC --writeH5
 # ====
 if __name__=='__main__':
     parser = ArgumentParser(description="Example of particle advection using in-memory stommel test case")

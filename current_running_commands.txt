@@ -19,3 +19,5 @@ python3 ENWS_scenario_Euler-only.py -f ENWS/metadata.txt -im 'rk45' -gres 32 -t 
 
 python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'ee' -gres 48 -t 365 -dt 2700 -ot 3600
 python3 ENWS_scenario_Euler-only.py -f metadata.txt -im 'ee' -gres 56 -t 365 -dt 2700 -ot 3600
+
+python3 SouthernOcean_Euler-only.py -f metadata.txt -im 'ee' -gres 6 -zsteps 25 -t 366 -dt 1800 -ot 3600 -chs 0 --convert_chunk --writeNC --writeH5
